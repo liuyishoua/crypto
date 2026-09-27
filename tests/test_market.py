@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
+from threading import Barrier
 from zipfile import ZipFile
 
 import pytest
@@ -201,3 +202,44 @@ def test_recent_range_uses_one_rest_request_instead_of_monthly_archives():
     assert len(session.calls) == 1
     assert data.source == "binance-rest"
     assert len(data.candles) == 30
+
+
+def test_public_live_snapshot_uses_rest_and_returns_incremental_trades():
+    class LiveSession:
+        def __init__(self): self.calls = []
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs["params"]))
+            if url.endswith("/depth"):
+                return Response({"lastUpdateId": 42, "bids": [["100", "2"]], "asks": [["101", "3"]]})
+            if url.endswith("/aggTrades"):
+                return Response([{"a": 8, "p": "101", "q": "1", "T": 1790000000000, "m": False}])
+            if url.endswith("/klines"):
+                return Response([[1790000000000, "100", "102", "99", "101", "12", 1790000059999]])
+            raise AssertionError(url)
+
+    session = LiveSession()
+    data = BinancePublicClient(session=session).live_snapshot("BTCUSDT", "1m", after_id=7)
+    assert data["snapshot"]["lastUpdateId"] == 42
+    assert data["trades"] == [{"a": 8, "p": "101", "q": "1", "T": 1790000000000, "m": False}]
+    assert data["kline"]["k"]["i"] == "1m"
+    assert data["kline"]["k"]["t"] == 1790000000000
+    assert set((url, tuple(sorted(params.items()))) for url, params in session.calls) == set((url, tuple(sorted(params.items()))) for url, params in [
+        ("https://data-api.binance.vision/api/v3/depth", {"symbol": "BTCUSDT", "limit": 20}),
+        ("https://data-api.binance.vision/api/v3/aggTrades", {"symbol": "BTCUSDT", "fromId": 8, "limit": 1000}),
+        ("https://data-api.binance.vision/api/v3/klines", {"symbol": "BTCUSDT", "interval": "1m", "limit": 1}),
+    ])
+
+
+def test_live_fallback_requests_sources_in_parallel():
+    barrier = Barrier(3)
+
+    class ConcurrentSession:
+        def get(self, url, **kwargs):
+            barrier.wait(timeout=2)
+            if url.endswith("/depth"):
+                return Response({"lastUpdateId": 10, "bids": [["100", "1"]], "asks": [["101", "1"]]})
+            if url.endswith("/aggTrades"):
+                return Response([])
+            return Response([[1790000000000, "100", "101", "99", "100", "1", 1790000059999]])
+
+    assert BinancePublicClient(session=ConcurrentSession()).live_snapshot("BTCUSDT", "1m")["snapshot"]["lastUpdateId"] == 10

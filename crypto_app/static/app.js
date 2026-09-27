@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, bookHistory: [], bookDepthShare: null, bookConnectedAt: null, recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
+const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookStaleTimer: null, orderBookPollTimer: null, orderBookPollController: null, orderBookMode: null, orderBookPollErrors: 0, lastTradeId: null, bookHistory: [], bookDepthShare: null, bookConnectedAt: null, recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
 
 function csrf() {
   const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
@@ -164,7 +164,7 @@ async function connectReadKey() {
   } catch (error) { toast(error.message); }
 }
 
-const intervalSeconds = { '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
+const intervalSeconds = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
 const utcDate = (value) => new Date(value).toISOString().slice(0, 10);
 const dayTimestamp = (value) => Date.parse(`${value}T00:00:00Z`) / 1000;
 const addUtcDays = (value, days) => utcDate(Date.parse(`${value}T00:00:00Z`) + days * 86400000);
@@ -264,11 +264,16 @@ function clearOrderBook(status) {
 
 function stopOrderBook(status = '已暂停') {
   ++state.orderBookGeneration;
-  clearTimeout(state.orderBookReconnect);
   clearTimeout(state.orderBookStaleTimer);
+  clearTimeout(state.orderBookPollTimer);
+  state.orderBookPollController?.abort();
   clearTimeout(state.tapeRenderTimer);
-  state.orderBookReconnect = null;
   state.orderBookStaleTimer = null;
+  state.orderBookPollTimer = null;
+  state.orderBookPollController = null;
+  state.orderBookMode = null;
+  state.orderBookPollErrors = 0;
+  state.lastTradeId = null;
   const socket = state.orderBookSocket;
   state.orderBookSocket = null;
   state.orderBookSymbol = null;
@@ -279,7 +284,6 @@ function stopOrderBook(status = '已暂停') {
   $('tape-buy-share').textContent = '—';
   $('book-flow-amounts').textContent = '等待成交';
   $('recent-trades').textContent = '等待成交';
-  state.orderBookAttempts = 0;
   if (socket) socket.close();
   clearOrderBook(status);
 }
@@ -403,6 +407,7 @@ function renderTradeTape() {
 
 function onRecentTrade(event) {
   if (!(Number(event.T) > 0 && Number(event.p) > 0 && Number(event.q) > 0) || typeof event.m !== 'boolean' || !Number.isFinite(Number(event.p) * Number(event.q))) return;
+  if (Number.isSafeInteger(Number(event.a))) state.lastTradeId = Math.max(state.lastTradeId ?? 0, Number(event.a));
   state.recentTrades.push({ id: event.a, time: Number(event.T), price: event.p, quantity: event.q, buyerMaker: event.m === true });
   if (!state.tapeRenderTimer) state.tapeRenderTimer = setTimeout(renderTradeTape, 250);
 }
@@ -418,57 +423,100 @@ function onCurrentKline(event) {
   $('chart-live-status').textContent = `${state.liveBarOpen ? '● 实时更新 · 当前 K 线未收盘' : '● K 线已收盘'} · ${MarketPresentation.clock(Number(event.E), true, false)} 北京时间`;
 }
 
+async function pollOrderBook(symbol, generation) {
+  if (generation !== state.orderBookGeneration || !orderBookActive() || state.orderBookMode !== 'poll') return;
+  const controller = new AbortController();
+  state.orderBookPollController = controller;
+  try {
+    const query = new URLSearchParams({ symbol, interval: state.orderBookInterval });
+    if (state.lastTradeId !== null) query.set('after_id', String(state.lastTradeId));
+    const data = await api(`/api/market/live?${query}`, { signal: controller.signal });
+    if (generation !== state.orderBookGeneration || state.orderBookMode !== 'poll') return;
+    renderOrderBook(data.snapshot);
+    for (const trade of data.trades) {
+      const id = Number(trade.a);
+      if (!Number.isSafeInteger(id) || id <= (state.lastTradeId ?? -1)) continue;
+      state.lastTradeId = id;
+      if (Number(trade.T) >= Date.now() - 60000) onRecentTrade(trade);
+    }
+    if (data.kline) onCurrentKline(data.kline);
+    state.orderBookPollErrors = 0;
+    $('order-book-status').textContent = `● 本地转发 · ${MarketPresentation.clock(data.fetchedAt, true, false)} 北京时间`;
+  } catch (error) {
+    if (generation !== state.orderBookGeneration || controller.signal.aborted) return;
+    state.orderBookPollErrors++;
+    clearOrderBook(`本地转发失败 · ${error.message} · 重试中`);
+  } finally {
+    if (state.orderBookPollController === controller) state.orderBookPollController = null;
+    if (generation === state.orderBookGeneration && orderBookActive() && state.orderBookMode === 'poll') {
+      const delay = state.orderBookPollErrors ? Math.min(10000, 1000 * 2 ** state.orderBookPollErrors) : 1000;
+      state.orderBookPollTimer = setTimeout(() => pollOrderBook(symbol, generation), delay);
+    }
+  }
+}
+
+function beginBookPolling(symbol, generation) {
+  if (generation !== state.orderBookGeneration || !orderBookActive() || state.orderBookMode === 'poll') return;
+  state.orderBookMode = 'poll';
+  clearTimeout(state.orderBookStaleTimer);
+  state.orderBookStaleTimer = null;
+  state.orderBookSocket?.close();
+  state.orderBookSocket = null;
+  state.orderBookPollErrors = 0;
+  state.lastTradeId = null;
+  state.recentTrades = [];
+  state.bookConnectedAt = Date.now();
+  clearTimeout(state.tapeRenderTimer);
+  state.tapeRenderTimer = null;
+  $('recent-trades').textContent = '等待本地转发的成交';
+  clearOrderBook('浏览器直连失败 · 正在启用本地转发');
+  pollOrderBook(symbol, generation);
+}
+
 function connectOrderBook(symbol, generation) {
   if (generation !== state.orderBookGeneration || !orderBookActive()) return;
   let socket;
   const interval = state.orderBookInterval;
   const stream = `${symbol.toLowerCase()}@depth20/${symbol.toLowerCase()}@aggTrade/${symbol.toLowerCase()}@kline_${interval}`;
   try { socket = new WebSocket(`wss://data-stream.binance.vision/stream?streams=${stream}`); }
-  catch { clearOrderBook('无法建立盘口连接'); return; }
+  catch { beginBookPolling(symbol, generation); return; }
+  state.orderBookMode = 'ws';
   state.orderBookSocket = socket;
   clearOrderBook('正在连接实时盘口…');
-  socket.onopen = () => { if (generation === state.orderBookGeneration) { state.bookConnectedAt = Date.now(); $('order-book-status').textContent = '已连接 · 等待盘口'; } };
+  state.orderBookStaleTimer = setTimeout(() => beginBookPolling(symbol, generation), 6000);
+  socket.onopen = () => { if (generation === state.orderBookGeneration && state.orderBookMode === 'ws') { state.bookConnectedAt = Date.now(); $('order-book-status').textContent = '已连接 · 等待盘口'; } };
   socket.onmessage = (event) => {
-    if (generation !== state.orderBookGeneration || !orderBookActive()) return;
+    if (generation !== state.orderBookGeneration || state.orderBookMode !== 'ws' || !orderBookActive()) return;
     try {
       const packet = JSON.parse(event.data);
       const data = packet.data;
       if (!data) return;
       if (Array.isArray(data.bids) && Array.isArray(data.asks) && Number.isSafeInteger(data.lastUpdateId)) {
-        state.orderBookAttempts = 0;
         renderOrderBook(data);
         clearTimeout(state.orderBookStaleTimer);
-        state.orderBookStaleTimer = setTimeout(() => clearOrderBook('超过 10 秒无更新 · 等待盘口'), 10000);
+        state.orderBookStaleTimer = setTimeout(() => beginBookPolling(symbol, generation), 10000);
       } else if (data.e === 'aggTrade') onRecentTrade(data);
       else if (data.e === 'kline') onCurrentKline(data);
     } catch { $('order-book-status').textContent = '盘口消息无效'; }
   };
-  socket.onerror = () => { if (generation === state.orderBookGeneration) { $('order-book-status').textContent = '连接出错 · 等待重连'; socket.close(); } };
+  socket.onerror = () => beginBookPolling(symbol, generation);
   socket.onclose = () => {
-    if (generation !== state.orderBookGeneration) return;
+    if (generation !== state.orderBookGeneration || state.orderBookMode !== 'ws') return;
     state.orderBookSocket = null;
-    state.bookConnectedAt = null;
-    state.recentTrades = [];
-    clearTimeout(state.tapeRenderTimer);
-    state.tapeRenderTimer = null;
-    $('recent-trades').textContent = '等待重连后的成交';
-    clearTimeout(state.orderBookStaleTimer);
     if (!orderBookActive()) { stopOrderBook('已暂停 · 返回市场页后恢复'); return; }
-    clearOrderBook('连接中断 · 正在重连');
-    const delay = Math.min(15000, 1000 * 2 ** Math.min(4, state.orderBookAttempts++));
-    state.orderBookReconnect = setTimeout(() => connectOrderBook(symbol, generation), delay);
+    beginBookPolling(symbol, generation);
   };
 }
 
 function startOrderBook(symbol) {
   if (!orderBookActive()) return;
-  if (!window.WebSocket) { clearOrderBook('浏览器不支持实时连接'); return; }
   const interval = $('interval').value;
-  if (state.orderBookSymbol === symbol && state.orderBookInterval === interval && (state.orderBookSocket || state.orderBookReconnect)) return;
+  if (state.orderBookSymbol === symbol && state.orderBookInterval === interval && state.orderBookMode) return;
   stopOrderBook('正在切换交易对…');
   state.orderBookSymbol = symbol;
   state.orderBookInterval = interval;
-  connectOrderBook(symbol, state.orderBookGeneration);
+  if (window.WebSocket) connectOrderBook(symbol, state.orderBookGeneration);
+  else beginBookPolling(symbol, state.orderBookGeneration);
 }
 
 async function loadMarket() {
@@ -803,7 +851,7 @@ let symbolSearchTimer;
 $('market-search').addEventListener('input', () => { clearTimeout(symbolSearchTimer); symbolSearchTimer = setTimeout(loadSymbols, 260); });
 $('quote-filter').addEventListener('change', loadSymbols);
 document.querySelectorAll('[data-market-tab]').forEach((button) => button.addEventListener('click', () => { state.marketTab = button.dataset.marketTab; document.querySelectorAll('[data-market-tab]').forEach((item) => item.classList.toggle('active', item === button)); renderMarketList(); }));
-document.querySelectorAll('[data-interval]').forEach((button) => button.addEventListener('click', () => { $('interval').value = button.dataset.interval; document.querySelectorAll('[data-interval]').forEach((item) => item.classList.toggle('active', item === button)); setPreset(({ '15m': 7, '1h': 30, '4h': 90, '1d': 90 })[button.dataset.interval]); }));
+document.querySelectorAll('[data-interval]').forEach((button) => button.addEventListener('click', () => { $('interval').value = button.dataset.interval; document.querySelectorAll('[data-interval]').forEach((item) => item.classList.toggle('active', item === button)); setPreset(({ '1m': 1, '5m': 7, '15m': 7, '1h': 30, '4h': 90, '1d': 90 })[button.dataset.interval]); }));
 document.querySelectorAll('[data-chart-style]').forEach((button) => button.addEventListener('click', () => { state.chartStyle = button.dataset.chartStyle; document.querySelectorAll('[data-chart-style]').forEach((item) => item.classList.toggle('active', item === button)); if (state.candles.length) renderChart(state.candles, state.fills, true); }));
 document.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => setPreset(Number(button.dataset.days))));
 $('range-start').addEventListener('input', () => applyRangeFromSlider('start'));

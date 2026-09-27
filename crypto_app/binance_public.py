@@ -1,5 +1,6 @@
 import csv
 import io
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import NamedTuple
@@ -67,6 +68,31 @@ class BinancePublicClient:
             0 if query and row.base == query else 1 if query and row.base.startswith(query) else 2,
             -(row.quote_volume or Decimal(0)), row.symbol,
         ))[:100]
+
+    def live_snapshot(self, symbol: str, interval: str, after_id: int | None = None) -> dict:
+        """Public REST fallback when a browser cannot reach the market WebSocket."""
+        trade_params = {"symbol": symbol, "limit": 1000 if after_id is not None else 500}
+        if after_id is not None:
+            trade_params["fromId"] = after_id + 1
+        try:
+            def fetch(path, params):
+                response = self.session.get(f"{self.PUBLIC_BASE}/api/v3/{path}", params=params, timeout=5)
+                response.raise_for_status()
+                return response.json()
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                depth_future = pool.submit(fetch, "depth", {"symbol": symbol, "limit": 20})
+                trades_future = pool.submit(fetch, "aggTrades", trade_params)
+                kline_future = pool.submit(fetch, "klines", {"symbol": symbol, "interval": interval, "limit": 1})
+                depth, trades, klines = depth_future.result(), trades_future.result(), kline_future.result()
+            if not isinstance(depth.get("bids"), list) or not isinstance(depth.get("asks"), list) or not isinstance(trades, list) or not isinstance(klines, list) or not klines:
+                raise ValueError("币安实时数据格式异常")
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            bar = klines[-1]
+            kline = {"E": now_ms, "s": symbol, "k": {"t": int(bar[0]), "o": bar[1], "h": bar[2], "l": bar[3], "c": bar[4], "v": bar[5], "x": now_ms > int(bar[6]), "i": interval}}
+            return {"snapshot": depth, "trades": trades, "kline": kline, "fetchedAt": now_ms}
+        except Exception as exc:
+            raise MarketUnavailable(f"实时公开数据不可用: {exc}") from exc
 
     def candles(self, symbol: str, interval: str, start: datetime, end: datetime) -> MarketData:
         if start.tzinfo is None or end.tzinfo is None or start >= end:

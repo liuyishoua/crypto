@@ -138,6 +138,17 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
         items = market_client.symbols(request.args.get("q", ""), quote=request.args.get("quote", "USDT").upper())
         return jsonify(items=[{"symbol": item.symbol, "base": item.base, "quote": item.quote, "status": item.status, "quote_volume": str(item.quote_volume) if item.quote_volume is not None else None, "change_percent": str(item.change_percent) if item.change_percent is not None else None} for item in items], stale=getattr(market_client, "catalog_stale", False))
 
+    @app.get("/api/market/live")
+    def market_live():
+        symbol = request.args.get("symbol", "").upper()
+        interval = request.args.get("interval", "")
+        cursor = request.args.get("after_id")
+        if not re.fullmatch(r"[A-Z0-9]{4,24}", symbol) or interval not in INTERVALS:
+            raise ValueError("交易对或 K 线周期无效")
+        if cursor is not None and (not re.fullmatch(r"\d{1,16}", cursor) or int(cursor) > 2**53 - 2):
+            raise ValueError("成交游标无效")
+        return jsonify(app.extensions["market_client"].live_snapshot(symbol, interval, int(cursor) if cursor is not None else None))
+
     @app.get("/api/candles")
     def candles():
         data = market_request(request.args, include_open=True)

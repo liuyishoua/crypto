@@ -115,6 +115,43 @@ def test_home_has_chart_and_simulation_status(tmp_path):
     assert browser.get("/static/vendor/lightweight-charts.standalone.production.js").status_code == 200
 
 
+def test_live_fallback_route_validates_symbol_and_passes_trade_cursor(tmp_path):
+    class LiveMarket(MarketClient):
+        def live_snapshot(self, symbol, interval, after_id=None):
+            assert (symbol, interval, after_id) == ("BTCUSDT", "1m", 47)
+            return {"snapshot": {"lastUpdateId": 10, "bids": [["100", "1"]], "asks": [["101", "1"]]}, "trades": [], "kline": None, "fetchedAt": 1790000000000}
+
+    app = create_app(tmp_path, market_client=LiveMarket())
+    app.testing = True
+    browser = app.test_client()
+    valid = browser.get("/api/market/live?symbol=BTCUSDT&interval=1m&after_id=47")
+    assert valid.status_code == 200
+    assert valid.json["snapshot"]["lastUpdateId"] == 10
+    assert browser.get("/api/market/live?symbol=BAD!&interval=1m").status_code == 400
+    assert browser.get("/api/market/live?symbol=BTCUSDT&interval=1m&after_id=-1").status_code == 400
+    assert browser.get("/api/market/live?symbol=BTCUSDT&interval=2m").status_code == 400
+
+
+def test_one_minute_chart_accepts_current_open_candle(tmp_path):
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today - timedelta(days=1)
+
+    class MinuteMarket(MarketClient):
+        def candles(self, symbol, interval, range_start, range_end):
+            assert interval == "1m"
+            count = int((range_end - range_start) / timedelta(minutes=1))
+            bars = tuple(Candle(range_start + timedelta(minutes=i), Decimal(10), Decimal(11), Decimal(9), Decimal(10), Decimal(100)) for i in range(count))
+            return MarketData("binance", "spot", symbol, interval, bars, "fixture", now, checksum_candles(bars))
+
+    app = create_app(tmp_path, market_client=MinuteMarket())
+    app.testing = True
+    response = app.test_client().get(f"/api/candles?symbol=BTCUSDT&interval=1m&start={start.date()}&end={(today + timedelta(days=1)).date()}")
+    assert response.status_code == 200
+    assert response.json["interval"] == "1m"
+    assert response.json["last_candle_open"] is True
+
+
 def test_current_day_chart_includes_open_hour_but_backtest_excludes_it(tmp_path):
     now = datetime.now(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
