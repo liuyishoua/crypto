@@ -1,6 +1,14 @@
 # 现货研究工作台
 
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
+
 个人本机使用的加密资产现货研究与手动交易工作台。默认仅监听 `127.0.0.1`。
+
+## 使用许可与风险声明
+
+**本项目仅供个人学习、研究、实验及其他符合许可证的非商业用途，禁止商业使用。** 对本仓库中版权所有者拥有权利的代码，适用 [PolyForm Noncommercial License 1.0.0](LICENSE)；商业使用须事先取得版权所有者的单独授权。本仓库是**源码可见、限制商用**项目，不属于 MIT 或 OSI 意义上的开源项目。第三方代码、素材和依赖仍受其各自许可证约束；MetaMask Connect 和 Lightweight Charts 的许可证见 `crypto_app/static/vendor/`。
+
+**软件按现状提供，不提供任何保证；在法律允许的最大范围内，作者不对使用本项目造成的损失承担责任。** 这里的行情、策略、回测和示例仅用于学习与研究，不构成投资建议或收益承诺。加密资产交易可能造成全部本金损失；API 密钥配置、订单确认、交易执行和账户安全由使用者自行判断与承担风险。
 
 开发环境：Python 3.12。安装依赖：`python3.12 -m venv .venv && .venv/bin/pip install -e '.[test]'`。启动：`.venv/bin/python -m crypto_app`。运行数据默认位于 `.runtime/`，不会提交到 Git。
 
