@@ -1,0 +1,15 @@
+{
+  "name": "crypto-workbench-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wallet": "esbuild crypto_app/static/wallet-entry.js --bundle --minify --format=iife --outfile=crypto_app/static/wallet.js",
+    "test:wallet": "node --test tests/wallet.test.mjs"
+  },
+  "dependencies": {
+    "@metamask/connect-evm": "2.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

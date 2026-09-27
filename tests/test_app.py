@@ -13,6 +13,7 @@ def test_local_app(tmp_path: Path):
     assert app.config["BIND_HOST"] == "127.0.0.1"
     assert (tmp_path / "run" / "crypto.db").exists()
     assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "wss://mm-sdk-relay.api.cx.metamask.io" in response.headers["Content-Security-Policy"]
 
     refused = client.post("/api/example", json={}, headers={"Host": "127.0.0.1"})
     assert refused.status_code == 403

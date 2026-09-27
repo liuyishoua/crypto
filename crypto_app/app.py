@@ -48,7 +48,7 @@ def create_app(runtime_dir: Path, market_client=None) -> Flask:
             response.set_cookie("csrf_token", secrets.token_urlsafe(32), httponly=False, samesite="Strict")
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://mm-sdk-relay.api.cx.metamask.io https://ethereum-rpc.publicnode.com https://bsc-rpc.publicnode.com; frame-ancestors 'none'"
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         return response
