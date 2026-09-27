@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, bookHistory: [], recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
+const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, bookHistory: [], bookDepthShare: null, bookConnectedAt: null, recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
 
 function csrf() {
   const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
@@ -169,12 +169,20 @@ const utcDate = (value) => new Date(value).toISOString().slice(0, 10);
 const dayTimestamp = (value) => Date.parse(`${value}T00:00:00Z`) / 1000;
 const addUtcDays = (value, days) => utcDate(Date.parse(`${value}T00:00:00Z`) + days * 86400000);
 
+function updateDateBoundaryNote() {
+  const start = $('start').value, end = $('end').value;
+  $('date-boundary-note').textContent = start && end
+    ? `开始：${start} 00:00 UTC = 北京时间 ${start} 08:00；结束（不含）：${end} 00:00 UTC = 北京时间 ${end} 08:00。日 K 在北京时间 08:00 换日。`
+    : 'UTC 日期的 00:00 = 北京时间当天 08:00；结束日期不包含在研究区间内。';
+}
+
 function setPreset(days, load = true) {
   const allowed = Math.max(1, Math.floor(2500 * intervalSeconds[$('interval').value] / 86400));
   const actual = Math.min(days, allowed);
   const end = addUtcDays(utcDate(new Date()), 1);
   $('end').value = end;
   $('start').value = addUtcDays(end, -actual);
+  updateDateBoundaryNote();
   document.querySelectorAll('[data-days]').forEach((button) => button.classList.toggle('active', Number(button.dataset.days) === days));
   if (actual !== days) toast(`当前周期最多加载约 ${allowed} 天，已缩短日期范围。`);
   if (load) loadMarket();
@@ -192,7 +200,7 @@ function renderChart(candles, fills = [], preserveRange = false) {
   const previousRange = preserveRange && state.chart ? state.chart.timeScale().getVisibleRange() : null;
   state.chartResizeObserver?.disconnect();
   if (state.chart) state.chart.remove();
-  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: '#ffffff' }, textColor: '#667085' }, grid: { vertLines: { color: '#f3f5f8' }, horzLines: { color: '#f3f5f8' } }, rightPriceScale: { borderColor: '#e8ebf0' }, timeScale: { borderColor: '#e8ebf0', timeVisible: $('interval').value !== '1d' }, handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } });
+  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: '#ffffff' }, textColor: '#667085' }, grid: { vertLines: { color: '#f3f5f8' }, horzLines: { color: '#f3f5f8' } }, rightPriceScale: { borderColor: '#e8ebf0' }, localization: { timeFormatter: (time) => MarketPresentation.clock(Number(time) * 1000) + ' 北京时间' }, timeScale: { borderColor: '#e8ebf0', timeVisible: $('interval').value !== '1d', tickMarkFormatter: (time) => MarketPresentation.chartTime(time, $('interval').value) }, handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } });
   const series = state.chartStyle === 'line' ? chart.addSeries(LightweightCharts.LineSeries, { color: '#347fe8', lineWidth: 2 }) : chart.addSeries(LightweightCharts.CandlestickSeries, { upColor: '#249e81', downColor: '#df6a6a', borderVisible: false, wickUpColor: '#249e81', wickDownColor: '#df6a6a' });
   series.setData(candles.map(({ time, open, high, low, close }) => state.chartStyle === 'line' ? { time, value: close } : { time, open, high, low, close }));
   const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', lastValueVisible: false, priceLineVisible: false });
@@ -211,7 +219,7 @@ function renderChart(candles, fills = [], preserveRange = false) {
     const bar = state.liveBar?.time === point.time ? state.liveBar : candles.find((item) => item.time === point.time);
     if (!bar) return;
     const isOpen = state.liveBar?.time === bar.time && state.liveBarOpen;
-    $('ohlc-readout').textContent = `${new Date(bar.time * 1000).toLocaleString()}（本机）${isOpen ? ' · 未收盘' : ''}  开 ${bar.open}  高 ${bar.high}  低 ${bar.low}  收 ${bar.close}  量 ${Number(bar.volume).toLocaleString()}`;
+    $('ohlc-readout').textContent = `${MarketPresentation.dualTime(bar.time * 1000)} 开盘${isOpen ? ' · 未收盘' : ''}  开 ${bar.open}  高 ${bar.high}  低 ${bar.low}  收 ${bar.close}  量 ${Number(bar.volume).toLocaleString()}`;
     const index = state.insightVisible.findIndex((item) => item.time === bar.time);
     if (index >= 0) updateInsightHover(index);
   });
@@ -237,6 +245,14 @@ function clearOrderBook(status) {
   $('book-spread').textContent = '—';
   $('book-balance').textContent = '—';
   $('book-balance-5').textContent = '—';
+  $('book-price-move').textContent = '—';
+  $('book-price-note').textContent = '等待至少两条成交';
+  $('book-depth-amounts').textContent = '等待挂单';
+  $('book-balance-fill').style.width = '50%';
+  $('book-reading').textContent = status;
+  $('book-reading-detail').textContent = '等待实时盘口和成交数据。';
+  $('book-sample').textContent = '观察窗口：等待连接';
+  state.bookDepthShare = null;
   $('book-balance-change').textContent = '—';
   $('book-trend').setAttribute('d', '');
   $('book-trend-range').textContent = '等待数据';
@@ -258,8 +274,10 @@ function stopOrderBook(status = '已暂停') {
   state.orderBookSymbol = null;
   state.orderBookInterval = null;
   state.recentTrades = [];
+  state.bookConnectedAt = null;
   state.tapeRenderTimer = null;
   $('tape-buy-share').textContent = '—';
+  $('book-flow-amounts').textContent = '等待成交';
   $('recent-trades').textContent = '等待成交';
   state.orderBookAttempts = 0;
   if (socket) socket.close();
@@ -280,17 +298,42 @@ function bookAmount(value) {
   return number >= 1e6 ? `${(number / 1e6).toFixed(2)}M` : number >= 1e3 ? `${(number / 1e3).toFixed(2)}K` : number.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
+function bookQuote() {
+  return ['USDT', 'USDC', 'FDUSD', 'BTC', 'ETH', 'BNB', 'TRY', 'EUR'].find((asset) => state.orderBookSymbol?.endsWith(asset)) || '报价币';
+}
+
+function updateBookReading() {
+  const now = Date.now();
+  const observedSeconds = state.bookConnectedAt ? Math.floor((now - state.bookConnectedAt) / 1000) : 0;
+  const windowTrades = state.recentTrades.filter((trade) => trade.time >= now - 60000);
+  const flow = MarketAnalytics.flow(windowTrades, now - 60000);
+  const reading = MarketPresentation.bookReading(state.bookDepthShare, flow.buyShare, flow.count, observedSeconds);
+  const priceMove = MarketPresentation.priceMove(windowTrades);
+  $('book-reading').textContent = reading.headline;
+  let priceNote = '至少两条成交后才计算；此值是首末成交价变化，不是 K 线涨跌。';
+  if (priceMove !== null && flow.count >= 10 && observedSeconds >= 15) {
+    if (flow.buyShare > 55 && priceMove <= 0) priceNote = '主动买成交额偏多，但成交价没有上行；可继续观察卖单是否补充，当前数据无法证明原因。';
+    else if (flow.buyShare < 45 && priceMove >= 0) priceNote = '主动卖成交额偏多，但成交价没有下行；可继续观察买单是否补充，当前数据无法证明原因。';
+    else priceNote = '成交方向与首末价格变化可对照看；短窗口无法预测后续行情。';
+  }
+  $('book-reading-detail').textContent = `${reading.detail} ${priceMove === null ? '' : priceNote}`;
+  $('book-sample').textContent = `成交观察：连接后 ${observedSeconds} 秒，最多最近 60 秒 · ${flow.count} 条聚合成交`;
+  $('tape-buy-share').textContent = flow.buyShare === null ? '等待成交' : `${flow.buyShare.toFixed(1)}%`;
+  $('book-flow-amounts').textContent = flow.count ? `主动买 ${bookAmount(flow.buyNotional)} / 主动卖 ${bookAmount(flow.sellNotional)} ${bookQuote()} · ${flow.count} 条` : '等待成交';
+  $('book-price-move').textContent = priceMove === null ? '—' : `${priceMove >= 0 ? '+' : ''}${priceMove.toFixed(3)}%`;
+  $('book-price-note').textContent = priceMove === null ? '等待至少两条成交' : `首笔 ${bookPrice(windowTrades[0].price)} → 末笔 ${bookPrice(windowTrades.at(-1).price)} · 最多 60 秒`;
+}
+
 function renderBookLevels(target, levels, side, receivedAt, updateId) {
   const maxNotional = Math.max(1, ...levels.map(([price, quantity]) => Number(price) * Number(quantity)));
   let cumulative = 0;
-  const received = new Date(receivedAt);
-  const shortTime = received.toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 });
+  const shortTime = MarketPresentation.clock(receivedAt, true, false, true);
   const rows = levels.map(([price, quantity]) => {
     const notional = Number(price) * Number(quantity);
     cumulative += notional;
     const row = document.createElement('div');
     row.className = `book-level ${side}`;
-    row.title = `币安现货 ${side === 'bid' ? '买盘' : '卖盘'}价位（汇总）\n价格：${price}\n数量：${quantity}\n该档名义金额：${notional}\n前 ${levels.length} 档内累计到此：${cumulative}\n本机接收：${received.toLocaleString()}\nUTC：${received.toISOString()}\n盘口更新 ID：${updateId}\n公开接口不提供挂单账号和单笔挂单时间`;
+    row.title = `币安现货 ${side === 'bid' ? '买盘' : '卖盘'}价位（汇总）\n价格：${price}\n数量：${quantity}\n该档名义金额：${notional}\n前 ${levels.length} 档内累计到此：${cumulative}\n快照接收：${MarketPresentation.dualTime(receivedAt, true)}\n盘口更新 ID：${updateId}\n公开接口不提供挂单账号和单笔挂单时间`;
     const width = Math.max(1, Math.min(100, notional / maxNotional * 100));
     row.style.background = `linear-gradient(to left, ${side === 'bid' ? '#e7f5ef' : '#fff0ef'} ${width}%, transparent ${width}%)`;
     for (const value of [bookPrice(price), bookAmount(quantity), bookAmount(cumulative), shortTime]) {
@@ -314,6 +357,10 @@ function renderOrderBook(snapshot) {
   $('book-spread').textContent = `${bookPrice((askPrice - bidPrice).toFixed(8))} · ${((askPrice - bidPrice) / askPrice * 100).toFixed(4)}%`;
   $('book-balance-5').textContent = top5.buyShare === null ? '—' : `${top5.buyShare.toFixed(1)}%`;
   $('book-balance').textContent = top20.buyShare === null ? '—' : `${top20.buyShare.toFixed(1)}%`;
+  $('book-depth-amounts').textContent = `买 ${bookAmount(top20.bidNotional)} / 卖 ${bookAmount(top20.askNotional)} ${bookQuote()}`;
+  $('book-balance-fill').style.width = `${top20.buyShare ?? 50}%`;
+  state.bookDepthShare = top20.buyShare;
+  updateBookReading();
   if (top20.buyShare !== null) {
     state.bookHistory.push({ time: receivedAt, share: top20.buyShare });
     state.bookHistory = state.bookHistory.filter((point) => point.time >= receivedAt - 60000);
@@ -330,7 +377,7 @@ function renderOrderBook(snapshot) {
     $('book-trend-range').textContent = `纵轴 ${min.toFixed(1)}–${max.toFixed(1)}% · 横轴最近 60 秒`;
     $('book-trend').setAttribute('d', state.bookHistory.map((point, index) => `${index ? 'L' : 'M'} ${(600 - (receivedAt - point.time) / 100).toFixed(1)} ${(64 - (point.share - min) / (max - min) * 56).toFixed(1)}`).join(' '));
   }
-  $('book-received').textContent = new Date(receivedAt).toLocaleString();
+  $('book-received').textContent = MarketPresentation.dualTime(receivedAt, true);
   $('order-book-status').textContent = '● 实时连接中';
   renderBookLevels('book-bids', bids, 'bid', receivedAt, snapshot.lastUpdateId);
   renderBookLevels('book-asks', asks, 'ask', receivedAt, snapshot.lastUpdateId);
@@ -339,14 +386,12 @@ function renderOrderBook(snapshot) {
 function renderTradeTape() {
   state.tapeRenderTimer = null;
   state.recentTrades = state.recentTrades.filter((trade) => trade.time >= Date.now() - 60000);
-  const flow = MarketAnalytics.flow(state.recentTrades, Date.now() - 60000);
-  $('tape-buy-share').textContent = flow.buyShare === null ? '等待成交' : `${flow.buyShare.toFixed(1)}% · ${flow.count} 条`;
+  updateBookReading();
   const rows = state.recentTrades.slice(-12).reverse().map((trade) => {
     const row = document.createElement('div');
     row.className = 'recent-trade';
-    const time = new Date(trade.time);
-    row.title = `币安现货成交 ID：${trade.id}\n交易所成交时间：${time.toLocaleString()}\nUTC：${time.toISOString()}\n价格：${trade.price}\n数量：${trade.quantity}\n名义成交额：${Number(trade.price) * Number(trade.quantity)}\n公开接口不提供交易双方账号`;
-    for (const [value, className] of [[time.toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 }), ''], [trade.buyerMaker ? '主动卖' : '主动买', trade.buyerMaker ? 'sell' : 'buy'], [bookPrice(trade.price), ''], [bookAmount(trade.quantity), ''], [bookAmount(Number(trade.price) * Number(trade.quantity)), '']]) {
+    row.title = `币安现货成交 ID：${trade.id}\n交易所成交时间：${MarketPresentation.dualTime(trade.time, true)}\n价格：${trade.price}\n数量：${trade.quantity}\n名义成交额：${Number(trade.price) * Number(trade.quantity)}\n公开接口不提供交易双方账号`;
+    for (const [value, className] of [[MarketPresentation.clock(trade.time, true, false, true), ''], [trade.buyerMaker ? '主动卖' : '主动买', trade.buyerMaker ? 'sell' : 'buy'], [bookPrice(trade.price), ''], [bookAmount(trade.quantity), ''], [bookAmount(Number(trade.price) * Number(trade.quantity)), '']]) {
       const cell = document.createElement('span'); cell.textContent = value; cell.className = className; row.append(cell);
     }
     return row;
@@ -370,7 +415,7 @@ function onCurrentKline(event) {
   state.liveBarOpen = bar.isOpen;
   state.series.update(state.chartStyle === 'line' ? { time: bar.time, value: bar.close } : { time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close });
   state.volumeSeries.update({ time: bar.time, value: Number(bar.volume), color: bar.close >= bar.open ? '#a7dccc' : '#f3b3b3' });
-  $('chart-live-status').textContent = `${state.liveBarOpen ? '● 实时更新 · 当前 K 线未收盘' : '● K 线已收盘'} · ${new Date(Number(event.E)).toLocaleTimeString()} 本机`;
+  $('chart-live-status').textContent = `${state.liveBarOpen ? '● 实时更新 · 当前 K 线未收盘' : '● K 线已收盘'} · ${MarketPresentation.clock(Number(event.E), true, false)} 北京时间`;
 }
 
 function connectOrderBook(symbol, generation) {
@@ -382,7 +427,7 @@ function connectOrderBook(symbol, generation) {
   catch { clearOrderBook('无法建立盘口连接'); return; }
   state.orderBookSocket = socket;
   clearOrderBook('正在连接实时盘口…');
-  socket.onopen = () => { if (generation === state.orderBookGeneration) $('order-book-status').textContent = '已连接 · 等待盘口'; };
+  socket.onopen = () => { if (generation === state.orderBookGeneration) { state.bookConnectedAt = Date.now(); $('order-book-status').textContent = '已连接 · 等待盘口'; } };
   socket.onmessage = (event) => {
     if (generation !== state.orderBookGeneration || !orderBookActive()) return;
     try {
@@ -402,6 +447,11 @@ function connectOrderBook(symbol, generation) {
   socket.onclose = () => {
     if (generation !== state.orderBookGeneration) return;
     state.orderBookSocket = null;
+    state.bookConnectedAt = null;
+    state.recentTrades = [];
+    clearTimeout(state.tapeRenderTimer);
+    state.tapeRenderTimer = null;
+    $('recent-trades').textContent = '等待重连后的成交';
     clearTimeout(state.orderBookStaleTimer);
     if (!orderBookActive()) { stopOrderBook('已暂停 · 返回市场页后恢复'); return; }
     clearOrderBook('连接中断 · 正在重连');
@@ -447,7 +497,7 @@ async function loadMarket() {
     $('stat-symbol').textContent = data.symbol;
     $('stat-count').textContent = `${data.candles.length} 根`;
     $('stat-source').textContent = data.source;
-    $('stat-time').textContent = `获取于 ${new Date(data.fetched_at).toLocaleString()}`;
+    $('stat-time').textContent = `获取于 ${MarketPresentation.dualTime(Date.parse(data.fetched_at))}`;
     $('chart-live-status').textContent = data.last_candle_open ? '● 当前 K 线未收盘 · 等待实时更新' : '历史 K 线 · 已收盘';
     renderChart(data.candles);
     setupRangeNavigator();
@@ -485,7 +535,8 @@ function syncRangeLabels() {
   const start = days[startIndex];
   const end = endIndex === days.length ? addUtcDays(days.at(-1), 1) : days[endIndex];
   $('start').value = start; $('end').value = end;
-  $('range-readout').textContent = `${start} → ${addUtcDays(end, -1)}（UTC）`;
+  $('range-readout').textContent = `${start} 08:00 → ${end} 08:00（结束不含，北京时间 UTC+8）`;
+  updateDateBoundaryNote();
   $('range-selection').style.left = `${startIndex / days.length * 100}%`;
   $('range-selection').style.width = `${(endIndex - startIndex) / days.length * 100}%`;
   const key = `${start}|${end}`;
@@ -747,6 +798,7 @@ $('trade-dialog-close').addEventListener('click', () => $('trade-dialog').close(
 $('trade-type').addEventListener('change', () => { $('trade-limit-label').hidden = $('trade-type').value === 'MARKET'; });
 $('strategy-kind').addEventListener('change', strategyParams);
 $('symbol').addEventListener('change', () => { $('symbol').value = $('symbol').value.trim().toUpperCase(); updateSelectedPair($('symbol').value); renderMarketList(); });
+for (const id of ['start', 'end']) $(id).addEventListener('change', updateDateBoundaryNote);
 let symbolSearchTimer;
 $('market-search').addEventListener('input', () => { clearTimeout(symbolSearchTimer); symbolSearchTimer = setTimeout(loadSymbols, 260); });
 $('quote-filter').addEventListener('change', loadSymbols);
