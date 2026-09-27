@@ -1,7 +1,6 @@
 import csv
 import io
-import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import NamedTuple
 from zipfile import ZipFile
@@ -23,34 +22,51 @@ class SymbolInfo(NamedTuple):
     quote: str
     status: str
     quote_volume: Decimal | None
+    change_percent: Decimal | None = None
 
 
 class BinancePublicClient:
+    PUBLIC_BASE = "https://data-api.binance.vision"
+
     def __init__(self, session=None):
         self.session = session or requests.Session()
         self._symbols = []
         self._symbols_at = None
+        self._tickers = {}
+        self._tickers_at = None
+        self.catalog_stale = False
 
-    def symbols(self, query: str) -> list[SymbolInfo]:
-        try:
-            response = self.session.get("https://api.binance.com/api/v3/exchangeInfo", timeout=10)
-            response.raise_for_status()
-            self._symbols = [SymbolInfo(row["symbol"], row["baseAsset"], row["quoteAsset"], row["status"], None) for row in response.json()["symbols"] if row.get("isSpotTradingAllowed")]
-            self._symbols_at = datetime.now(timezone.utc)
-        except Exception as exc:
-            raise MarketUnavailable(f"交易对目录不可用: {exc}", cached_at=self._symbols_at) from exc
-        query = query.upper().strip()
-        matches = [row for row in self._symbols if query in row.symbol or query in row.base]
-        if matches:
-            selected = matches[:20]
+    def symbols(self, query: str, quote: str = "USDT") -> list[SymbolInfo]:
+        now = datetime.now(timezone.utc)
+        if self._symbols_at is None or now - self._symbols_at >= timedelta(minutes=15):
             try:
-                response = self.session.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbols": json.dumps([row.symbol for row in selected])}, timeout=10)
+                response = self.session.get(f"{self.PUBLIC_BASE}/api/v3/exchangeInfo", timeout=10)
                 response.raise_for_status()
-                volumes = {item["symbol"]: Decimal(str(item["quoteVolume"])) for item in response.json()}
-                matches = [row._replace(quote_volume=volumes.get(row.symbol)) for row in matches]
+                self._symbols = [SymbolInfo(row["symbol"], row["baseAsset"], row["quoteAsset"], row["status"], None) for row in response.json()["symbols"] if row.get("isSpotTradingAllowed")]
+                self._symbols_at = now
+                self.catalog_stale = False
+            except Exception as exc:
+                if not self._symbols:
+                    raise MarketUnavailable(f"交易对目录不可用: {exc}", cached_at=self._symbols_at) from exc
+                self.catalog_stale = True
+        if self._tickers_at is None or now - self._tickers_at >= timedelta(minutes=1):
+            try:
+                response = self.session.get(f"{self.PUBLIC_BASE}/api/v3/ticker/24hr", timeout=10)
+                response.raise_for_status()
+                self._tickers = {item["symbol"]: item for item in response.json()}
+                self._tickers_at = now
             except Exception:
-                pass
-        return matches
+                self._tickers_at = now
+        query = query.upper().strip()
+        matches = [row for row in self._symbols if row.status == "TRADING" and (not quote or row.quote == quote) and (query in row.symbol or query in row.base)]
+        enriched = []
+        for row in matches:
+            ticker = self._tickers.get(row.symbol, {})
+            enriched.append(row._replace(quote_volume=Decimal(str(ticker["quoteVolume"])) if "quoteVolume" in ticker else None, change_percent=Decimal(str(ticker["priceChangePercent"])) if "priceChangePercent" in ticker else None))
+        return sorted(enriched, key=lambda row: (
+            0 if query and row.base == query else 1 if query and row.base.startswith(query) else 2,
+            -(row.quote_volume or Decimal(0)), row.symbol,
+        ))[:100]
 
     def candles(self, symbol: str, interval: str, start: datetime, end: datetime) -> MarketData:
         if start.tzinfo is None or end.tzinfo is None or start >= end:
@@ -78,7 +94,7 @@ class BinancePublicClient:
         candles = tuple(bars)
         source = next(iter(sources)) if len(sources) == 1 else "binance-public-data+rest"
         result = MarketData("binance", "spot", symbol, interval, candles, source, datetime.now(timezone.utc), checksum_candles(candles))
-        validate_candles(result)
+        validate_candles(result, min_bars=1)
         return result
 
     def _rest_candles(self, symbol, interval, start, end):
@@ -87,7 +103,7 @@ class BinancePublicClient:
         finish = int(end.timestamp() * 1000)
         while cursor < finish:
             try:
-                response = self.session.get("https://api.binance.com/api/v3/klines", params={"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": finish - 1, "limit": 1000}, timeout=15)
+                response = self.session.get(f"{self.PUBLIC_BASE}/api/v3/klines", params={"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": finish - 1, "limit": 1000}, timeout=15)
                 response.raise_for_status()
                 batch = response.json()
             except Exception as exc:

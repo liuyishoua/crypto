@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { chart: null, series: null, markers: null, candles: [] };
+const state = { chart: null, series: null, candles: [], insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [] };
 
 function csrf() {
   const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
@@ -35,6 +35,7 @@ function showPage(name) {
   $('topbar-mode').textContent = name === 'trade' ? '● 真实交易 · 逐笔确认' : name === 'assets' || name === 'settings' ? '● 本机账户 · 只读默认' : '● 研究模式 · 模拟结果';
   $('topbar-mode').classList.toggle('live-mode', name === 'trade');
   if (name === 'records') loadRecords();
+  if (name === 'market' && state.chart) state.chart.applyOptions({ width: $('chart').clientWidth, height: $('chart').clientHeight });
   if (name === 'assets') loadAssets();
   if (name === 'trade') { loadTradeSettings(); loadTradeOrders(); }
 }
@@ -158,34 +159,235 @@ async function connectReadKey() {
   } catch (error) { toast(error.message); }
 }
 
-function renderChart(candles, fills = []) {
+const intervalSeconds = { '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
+const utcDate = (value) => new Date(value).toISOString().slice(0, 10);
+const dayTimestamp = (value) => Date.parse(`${value}T00:00:00Z`) / 1000;
+const addUtcDays = (value, days) => utcDate(Date.parse(`${value}T00:00:00Z`) + days * 86400000);
+
+function setPreset(days, load = true) {
+  const allowed = Math.max(1, Math.floor(2500 * intervalSeconds[$('interval').value] / 86400));
+  const actual = Math.min(days, allowed);
+  const end = utcDate(new Date());
+  $('end').value = end;
+  $('start').value = addUtcDays(end, -actual);
+  document.querySelectorAll('[data-days]').forEach((button) => button.classList.toggle('active', Number(button.dataset.days) === days));
+  if (actual !== days) toast(`当前周期最多加载约 ${allowed} 天，已缩短日期范围。`);
+  if (load) loadMarket();
+}
+
+function updateSelectedPair(symbol) {
+  const quote = ['USDT', 'BTC', 'ETH', 'BNB'].find((suffix) => symbol.endsWith(suffix)) || '';
+  $('selected-pair').textContent = quote ? `${symbol.slice(0, -quote.length)} / ${quote}` : symbol;
+  $('symbol-hint').textContent = '选择左侧币种，或展开“自定义日期”输入交易对';
+}
+
+function renderChart(candles, fills = [], preserveRange = false) {
   const container = $('chart');
   if (!window.LightweightCharts) { container.textContent = '图表组件暂不可用，请查看下方数据。'; return; }
+  const previousRange = preserveRange && state.chart ? state.chart.timeScale().getVisibleRange() : null;
+  state.chartResizeObserver?.disconnect();
   if (state.chart) state.chart.remove();
-  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: '#ffffff' }, textColor: '#667085' }, grid: { vertLines: { color: '#f3f5f8' }, horzLines: { color: '#f3f5f8' } }, rightPriceScale: { borderColor: '#e8ebf0' }, timeScale: { borderColor: '#e8ebf0' } });
-  const series = chart.addSeries(LightweightCharts.CandlestickSeries, { upColor: '#249e81', downColor: '#df6a6a', borderVisible: false, wickUpColor: '#249e81', wickDownColor: '#df6a6a' });
-  series.setData(candles.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
+  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: '#ffffff' }, textColor: '#667085' }, grid: { vertLines: { color: '#f3f5f8' }, horzLines: { color: '#f3f5f8' } }, rightPriceScale: { borderColor: '#e8ebf0' }, timeScale: { borderColor: '#e8ebf0', timeVisible: $('interval').value !== '1d' }, handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } });
+  const series = state.chartStyle === 'line' ? chart.addSeries(LightweightCharts.LineSeries, { color: '#347fe8', lineWidth: 2 }) : chart.addSeries(LightweightCharts.CandlestickSeries, { upColor: '#249e81', downColor: '#df6a6a', borderVisible: false, wickUpColor: '#249e81', wickDownColor: '#df6a6a' });
+  series.setData(candles.map(({ time, open, high, low, close }) => state.chartStyle === 'line' ? { time, value: close } : { time, open, high, low, close }));
   const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', lastValueVisible: false, priceLineVisible: false });
   volume.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
   volume.setData(candles.map(({ time, open, close, volume: amount }) => ({ time, value: Number(amount), color: close >= open ? '#a7dccc' : '#f3b3b3' })));
   const markers = fills.map((fill) => ({ time: Math.floor(Date.parse(fill.filled_at) / 1000), position: fill.side === 'BUY' ? 'belowBar' : 'aboveBar', color: fill.side === 'BUY' ? '#249e81' : '#df6a6a', shape: fill.side === 'BUY' ? 'arrowUp' : 'arrowDown', text: `${fill.side === 'BUY' ? '模拟买入' : '模拟卖出'} ${Number(fill.price).toFixed(3)}` }));
   if (markers.length) LightweightCharts.createSeriesMarkers(series, markers);
   chart.timeScale().fitContent();
+  if (previousRange) chart.timeScale().setVisibleRange(previousRange);
+  chart.subscribeCrosshairMove((point) => {
+    const bar = candles.find((item) => item.time === point.time);
+    if (!bar) return;
+    $('ohlc-readout').textContent = `${utcDate(bar.time * 1000)}  开 ${bar.open}  高 ${bar.high}  低 ${bar.low}  收 ${bar.close}  量 ${Number(bar.volume).toLocaleString()}`;
+    const index = state.insightVisible.findIndex((item) => item.time === bar.time);
+    if (index >= 0) updateInsightHover(index);
+  });
+  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+    if (!range || state.syncingRange || !state.rangeDays.length || typeof range.from !== 'number') return;
+    const first = state.rangeDays.findIndex((day, index) => index === state.rangeDays.length - 1 || dayTimestamp(state.rangeDays[index + 1]) > range.from);
+    const last = state.rangeDays.findIndex((day) => dayTimestamp(day) > range.to);
+    $('range-start').value = String(Math.max(0, first));
+    $('range-end').value = String(Math.max(Number($('range-start').value) + 1, last === -1 ? state.rangeDays.length : last));
+    syncRangeLabels();
+  });
+  state.chartResizeObserver = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }));
+  state.chartResizeObserver.observe(container);
   state.chart = chart;
   state.series = series;
+  state.fills = fills;
 }
 
 async function loadMarket() {
+  const requestId = ++state.marketRequestId;
   try {
+    if (!$('start').value || !$('end').value || $('start').value >= $('end').value) throw new Error('请选择有效的开始和结束日期。');
+    $('load-market').disabled = true;
     const data = await api(`/api/candles?${query()}`);
+    if (requestId !== state.marketRequestId) return;
     state.candles = data.candles;
+    state.insights = data.insights || [];
+    state.rangeDays = [...new Set(data.candles.map((bar) => utcDate(bar.time * 1000)))];
+    updateSelectedPair(data.symbol);
     $('stat-symbol').textContent = data.symbol;
     $('stat-count').textContent = `${data.candles.length} 根`;
     $('stat-source').textContent = data.source;
     $('stat-time').textContent = `获取于 ${new Date(data.fetched_at).toLocaleString()}`;
     renderChart(data.candles);
+    setupRangeNavigator();
+    renderMarketList();
     toast(data.source.startsWith('cache:') ? '当前使用离线缓存；请核对获取时间和数据覆盖。' : '行情已加载；请检查数据覆盖后再回测。');
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    if (requestId === state.marketRequestId) toast(error.message.includes('历史数据未覆盖') ? '该币在所选日期内历史不足；请选择近 30 天、近 7 天或自定义更短区间。' : error.message);
+  }
+  finally { if (requestId === state.marketRequestId) $('load-market').disabled = false; }
+}
+
+function setupRangeNavigator() {
+  const days = state.rangeDays;
+  if (!days.length) return;
+  $('range-start').max = String(days.length - 1);
+  $('range-end').max = String(days.length);
+  $('range-start').value = '0';
+  $('range-end').value = String(days.length);
+  const daily = days.map((day) => state.candles.filter((bar) => utcDate(bar.time * 1000) === day).at(-1).close);
+  const low = Math.min(...daily), high = Math.max(...daily);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', daily.map((value, index) => `${index ? 'L' : 'M'} ${(index / Math.max(1, daily.length - 1) * 600).toFixed(1)} ${(48 - ((value - low) / (high - low || 1) * 42)).toFixed(1)}`).join(' '));
+  path.setAttribute('fill', 'none'); path.setAttribute('stroke', '#8bb6f0'); path.setAttribute('stroke-width', '2');
+  $('range-overview').replaceChildren(path);
+  syncRangeLabels();
+}
+
+function syncRangeLabels() {
+  const days = state.rangeDays;
+  if (!days.length) return;
+  const startIndex = Math.max(0, Math.min(days.length - 1, Number($('range-start').value)));
+  const endIndex = Math.max(startIndex + 1, Math.min(days.length, Number($('range-end').value)));
+  const start = days[startIndex];
+  const end = endIndex === days.length ? addUtcDays(days.at(-1), 1) : days[endIndex];
+  $('start').value = start; $('end').value = end;
+  $('range-readout').textContent = `${start} → ${addUtcDays(end, -1)}（UTC）`;
+  $('range-selection').style.left = `${startIndex / days.length * 100}%`;
+  $('range-selection').style.width = `${(endIndex - startIndex) / days.length * 100}%`;
+  renderInsights(start, end);
+}
+
+function applyRangeFromSlider(changed) {
+  if (!state.rangeDays.length) return;
+  const start = $('range-start'), end = $('range-end');
+  if (Number(start.value) >= Number(end.value)) {
+    if (changed === 'start') start.value = String(Number(end.value) - 1);
+    else end.value = String(Number(start.value) + 1);
+  }
+  syncRangeLabels();
+  if (state.chart) {
+    state.syncingRange = true;
+    try { const from = dayTimestamp($('start').value); state.chart.timeScale().setVisibleRange({ from, to: Math.max(from + intervalSeconds[$('interval').value], dayTimestamp($('end').value) - intervalSeconds[$('interval').value]) }); }
+    finally { state.syncingRange = false; }
+  }
+}
+
+const insightMetrics = [
+  ['insight-momentum', 'momentum_20', (value) => `${value > 0 ? '+' : ''}${value.toFixed(2)}%`],
+  ['insight-volume', 'volume_ratio_20', (value) => `${value.toFixed(2)}×`],
+  ['insight-drawdown', 'drawdown_20', (value) => `${value.toFixed(2)}%`]
+];
+
+function updateInsightHover(index) {
+  const point = state.insightVisible[index];
+  if (!point) return;
+  insightMetrics.forEach(([id, key, format]) => {
+    const card = $(id), value = point[key];
+    card.querySelector('strong').textContent = value === null || value === undefined ? '样本不足' : format(value);
+    const cursor = card.querySelector('.insight-cursor');
+    if (cursor) { const x = 12 + index / Math.max(1, state.insightVisible.length - 1) * 276; cursor.setAttribute('x1', x); cursor.setAttribute('x2', x); cursor.style.display = ''; }
+  });
+}
+
+function renderInsights(start, end) {
+  state.insightVisible = state.insights.filter((item) => item.time >= dayTimestamp(start) && item.time < dayTimestamp(end));
+  insightMetrics.forEach(([id, key]) => {
+    const card = $(id), svg = card.querySelector('svg');
+    const values = state.insightVisible.map((item) => item[key]).filter((value) => value !== null && value !== undefined);
+    svg.replaceChildren();
+    if (!values.length) { card.querySelector('strong').textContent = '样本不足'; return; }
+    const low = Math.min(...values), high = Math.max(...values);
+    let drawing = false;
+    const points = state.insightVisible.map((item, index) => {
+      const value = item[key];
+      if (value === null || value === undefined) { drawing = false; return ''; }
+      const x = 12 + index / Math.max(1, state.insightVisible.length - 1) * 276;
+      const y = 86 - (value - low) / (high - low || 1) * 72;
+      const command = drawing ? 'L' : 'M'; drawing = true;
+      return `${command} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(' ');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', points); path.setAttribute('class', 'insight-line');
+    const cursor = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    cursor.setAttribute('y1', '8'); cursor.setAttribute('y2', '92'); cursor.setAttribute('class', 'insight-cursor'); cursor.style.display = 'none';
+    svg.append(path, cursor);
+    svg.onpointermove = (event) => { const rect = svg.getBoundingClientRect(); updateInsightHover(Math.max(0, Math.min(state.insightVisible.length - 1, Math.round((event.clientX - rect.left) / rect.width * (state.insightVisible.length - 1))))); };
+    svg.onpointerleave = () => updateInsightHover(state.insightVisible.length - 1);
+  });
+  updateInsightHover(state.insightVisible.length - 1);
+}
+
+const offlineCandidates = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LINK', 'SUI', 'PEPE'].map((base) => ({ symbol: `${base}USDT`, base, quote: 'USDT', status: 'UNVERIFIED', quote_volume: null, change_percent: null }));
+function formatVolume(value) {
+  if (value === null || value === undefined) return '成交额未知';
+  const number = Number(value);
+  return `24h ${number >= 1e9 ? (number / 1e9).toFixed(1) + 'B' : number >= 1e6 ? (number / 1e6).toFixed(1) + 'M' : number >= 1e3 ? (number / 1e3).toFixed(1) + 'K' : number.toFixed(0)}`;
+}
+
+function renderMarketList() {
+  const queryText = $('market-search').value.trim().toUpperCase();
+  const quote = $('quote-filter').value;
+  let items = state.symbols.filter((item) => (!quote || item.quote === quote) && (!queryText || item.symbol.includes(queryText) || item.base.includes(queryText)));
+  if (state.marketTab === 'favorites') {
+    const bySymbol = new Map(items.map((item) => [item.symbol, item]));
+    items = state.favorites.map((symbol) => {
+      const suffix = ['USDT', 'BTC', 'ETH', 'BNB'].find((value) => symbol.endsWith(value)) || '';
+      return bySymbol.get(symbol) || { symbol, base: suffix ? symbol.slice(0, -suffix.length) : symbol, quote: suffix, status: 'UNVERIFIED', quote_volume: null, change_percent: null };
+    }).filter((item) => (!quote || item.quote === quote) && (!queryText || item.symbol.includes(queryText)));
+  }
+  $('market-list').replaceChildren(...items.slice(0, 100).map((item) => {
+    const row = document.createElement('div'); row.className = 'market-row'; row.setAttribute('role', 'listitem');
+    const favorite = document.createElement('button'); favorite.type = 'button'; favorite.className = 'market-favorite'; favorite.textContent = state.favorites.includes(item.symbol) ? '★' : '☆'; favorite.setAttribute('aria-label', `${state.favorites.includes(item.symbol) ? '取消自选' : '加入自选'} ${item.symbol}`);
+    favorite.addEventListener('click', () => { state.favorites = state.favorites.includes(item.symbol) ? state.favorites.filter((name) => name !== item.symbol) : [...state.favorites, item.symbol]; localStorage.setItem('crypto-market-favorites', JSON.stringify(state.favorites)); renderMarketList(); });
+    const select = document.createElement('button'); select.type = 'button'; select.className = `market-pair${$('symbol').value === item.symbol ? ' active' : ''}`; select.setAttribute('aria-label', `查看 ${item.symbol} 行情`);
+    const name = document.createElement('span'); name.className = 'market-name'; const title = document.createElement('strong'); title.textContent = item.base; const detail = document.createElement('small'); detail.textContent = item.quote; name.append(title, detail);
+    const move = document.createElement('span'); move.className = 'market-move'; const change = Number(item.change_percent); move.textContent = item.change_percent === null ? '—' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`; move.classList.add(item.change_percent === null ? 'unverified' : change >= 0 ? 'positive' : 'negative'); const volume = document.createElement('small'); volume.textContent = item.status === 'UNVERIFIED' ? '未核验' : formatVolume(item.quote_volume); move.append(volume);
+    select.append(name, move); select.addEventListener('click', () => { $('symbol').value = item.symbol; updateSelectedPair(item.symbol); renderMarketList(); loadMarket(); }); row.append(favorite, select); return row;
+  }));
+  if (!items.length) $('market-list-status').textContent = state.marketTab === 'favorites' ? '自选为空，可点币种旁的星标添加。' : '没有匹配的交易对，可在自定义日期里手动输入。';
+}
+
+async function loadSymbols() {
+  const requestId = ++state.symbolRequestId;
+  const queryText = $('market-search').value.trim();
+  $('market-list-status').textContent = '正在加载交易对…';
+  try {
+    const quote = $('quote-filter').value;
+    const data = await api(`/api/symbols?q=${encodeURIComponent(queryText)}&quote=${encodeURIComponent(quote)}`);
+    if (requestId !== state.symbolRequestId) return;
+    state.symbols = data.items;
+    $('market-list-status').textContent = data.stale ? `使用上次成功目录 · ${data.items.length} 个结果` : `${queryText ? '优先显示匹配币种' : '按 24 小时成交额排序'} · ${data.items.length} 个结果`;
+  } catch (error) {
+    if (requestId !== state.symbolRequestId) return;
+    state.symbols = offlineCandidates;
+    $('market-list-status').textContent = '交易所目录暂不可用；下方是未核验的常见候选。';
+  }
+  renderMarketList();
+}
+
+function initializeMarketExplorer() {
+  try { const saved = JSON.parse(localStorage.getItem('crypto-market-favorites') || '[]'); state.favorites = Array.isArray(saved) ? saved.filter((value) => typeof value === 'string') : []; }
+  catch { state.favorites = []; }
+  setPreset(90, false);
+  loadSymbols();
+  loadMarket();
 }
 
 const descriptions = {
@@ -222,7 +424,7 @@ async function runBacktest() {
     const metrics = [['总收益', result.total_return], ['最大回撤', result.max_drawdown], ['交易次数', result.fills.length], ['手续费总额', result.fees_total], ['胜率', result.win_rate], ['买入持有基准', result.benchmark_return], ['年化收益', result.annualized_return ?? '不足 30 天']];
     $('backtest-summary').replaceChildren(...metrics.map(([name, value]) => { const item = document.createElement('div'); item.className = 'metric'; const label = document.createElement('span'); label.textContent = name; const number = document.createElement('strong'); number.textContent = String(value); item.append(label, number); return item; }));
     $('fills-body').replaceChildren(...result.fills.map((fill) => { const row = document.createElement('tr'); [fill.signal_at, fill.filled_at, fill.side === 'BUY' ? '模拟买入' : '模拟卖出', fill.quantity, fill.price, fill.fee, fill.cash_after, fill.coins_after].forEach((value) => { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }); return row; }));
-    if (state.candles.length) renderChart(state.candles, result.fills);
+    if (state.candles.length) renderChart(state.candles, result.fills, true);
     toast(`回测 #${id} 已保存。历史模拟不代表未来收益。`);
   } catch (error) { toast(error.message); }
 }
@@ -260,9 +462,17 @@ $('trade-dialog-submit').addEventListener('click', submitTradeDialog);
 $('trade-dialog-close').addEventListener('click', () => $('trade-dialog').close());
 $('trade-type').addEventListener('change', () => { $('trade-limit-label').hidden = $('trade-type').value === 'MARKET'; });
 $('strategy-kind').addEventListener('change', strategyParams);
-$('symbol').addEventListener('input', async () => {
-  const query = $('symbol').value.trim();
-  if (query.length < 2) return;
-  try { const data = await api(`/api/symbols?q=${encodeURIComponent(query)}`); $('symbol-hint').textContent = data.items.slice(0, 3).map((item) => `${item.symbol} (${item.status === 'TRADING' ? '交易中' : '暂停'}${item.quote_volume ? `，24h 成交额 ${Number(item.quote_volume).toLocaleString()} ${item.quote}` : ''})`).join(' · ') || '没有匹配的现货交易对'; } catch (error) { $('symbol-hint').textContent = error.message; }
-});
+$('symbol').addEventListener('change', () => { $('symbol').value = $('symbol').value.trim().toUpperCase(); updateSelectedPair($('symbol').value); renderMarketList(); });
+let symbolSearchTimer;
+$('market-search').addEventListener('input', () => { clearTimeout(symbolSearchTimer); symbolSearchTimer = setTimeout(loadSymbols, 260); });
+$('quote-filter').addEventListener('change', loadSymbols);
+document.querySelectorAll('[data-market-tab]').forEach((button) => button.addEventListener('click', () => { state.marketTab = button.dataset.marketTab; document.querySelectorAll('[data-market-tab]').forEach((item) => item.classList.toggle('active', item === button)); renderMarketList(); }));
+document.querySelectorAll('[data-interval]').forEach((button) => button.addEventListener('click', () => { $('interval').value = button.dataset.interval; document.querySelectorAll('[data-interval]').forEach((item) => item.classList.toggle('active', item === button)); setPreset(({ '15m': 7, '1h': 30, '4h': 90, '1d': 90 })[button.dataset.interval]); }));
+document.querySelectorAll('[data-chart-style]').forEach((button) => button.addEventListener('click', () => { state.chartStyle = button.dataset.chartStyle; document.querySelectorAll('[data-chart-style]').forEach((item) => item.classList.toggle('active', item === button)); if (state.candles.length) renderChart(state.candles, state.fills, true); }));
+document.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => setPreset(Number(button.dataset.days))));
+$('range-start').addEventListener('input', () => applyRangeFromSlider('start'));
+$('range-end').addEventListener('input', () => applyRangeFromSlider('end'));
+$('chart-fit').addEventListener('click', () => { if (state.chart) { state.chart.timeScale().fitContent(); $('range-start').value = '0'; $('range-end').value = String(state.rangeDays.length); syncRangeLabels(); } });
+for (const [id, factor] of [['chart-zoom-in', 0.75], ['chart-zoom-out', 1.35]]) $(id).addEventListener('click', () => { const scale = state.chart?.timeScale(); const range = scale?.getVisibleLogicalRange(); if (!range) return; const center = (range.from + range.to) / 2; const half = (range.to - range.from) * factor / 2; scale.setVisibleLogicalRange({ from: center - half, to: center + half }); });
+initializeMarketExplorer();
 strategyParams();

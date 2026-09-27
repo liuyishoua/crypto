@@ -28,17 +28,30 @@
       <header class="topbar"><span id="topbar-title">研究 / 现货市场</span><span id="topbar-mode" class="mode">● 研究模式 · 模拟结果</span></header>
       <div class="content">
         <section class="page active" id="page-market">
-          <div class="pagehead"><div><div class="eyebrow">MARKET RESEARCH</div><h1>看清数据，再看信号。</h1><p class="subtitle">搜索任意可用币安现货交易对，检查历史覆盖后开展研究。</p></div><span class="pill">公开行情 · 无需密钥</span></div>
-          <div class="panel"><div class="panelbody filters">
-            <label>交易对 <input id="symbol" value="BTCUSDT" autocomplete="off" placeholder="输入 BTC、SOL 或交易对"><span id="symbol-hint" class="hint"></span></label>
-            <label>周期 <select id="interval"><option value="1d">日线 1D</option><option value="4h">4 小时</option><option value="1h">1 小时</option></select></label>
-            <label>开始 <input id="start" type="date" value="2024-01-01"></label>
-            <label>结束 <input id="end" type="date" value="2024-05-01"></label>
-            <button id="load-market" class="primary">加载行情</button>
-          </div></div>
-          <div class="statgrid"><div class="stat"><small>交易对</small><strong id="stat-symbol">—</strong><span>币安现货</span></div><div class="stat"><small>数据覆盖</small><strong id="stat-count">—</strong><span>连续 K 线</span></div><div class="stat"><small>数据来源</small><strong id="stat-source">—</strong><span id="stat-time">等待加载</span></div></div>
-          <div class="panel"><div class="paneltitle"><div><h2>行情与信号</h2><p class="hint">鼠标悬停查看价格；下方柱形显示成交量（基础币）；回测后标出模拟成交。</p></div><span class="pill subtle">模拟 · 历史数据</span></div><div class="panelbody"><div id="chart" role="img" aria-label="现货 K 线与成交量图"></div><div class="chart-credit">Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView</a></div></div></div>
-          <div class="panel"><div class="paneltitle"><h2>研究须知</h2></div><div class="panelbody"><p class="hint">K 线只记录一段时间的开高低收，无法证明真实订单簿中的成交价与滑点。回测是规则在历史数据上的模拟，不能说明未来涨跌原因或保证收益。</p></div></div>
+          <div class="pagehead"><div><div class="eyebrow">MARKET EXPLORER</div><h1>从币种列表，走到自己的判断。</h1><p class="subtitle">先选币，再拖动时间轴；所有指标都能追溯到现货 K 线。</p></div><span class="pill">币安公开现货 · 无需密钥</span></div>
+          <div class="market-layout">
+            <aside class="panel market-browser" aria-label="现货币种列表">
+              <div class="paneltitle"><h2>市场列表</h2><span class="pill subtle">现货</span></div>
+              <div class="market-browser-controls"><label>搜索币种或交易对<input id="market-search" autocomplete="off" placeholder="BTC、SOL、PEPE…"></label><label>报价币<select id="quote-filter"><option value="USDT">USDT</option><option value="BTC">BTC</option><option value="">全部</option></select></label></div>
+              <div class="market-tabs"><button class="active" type="button" data-market-tab="all">全部</button><button type="button" data-market-tab="favorites">★ 自选</button></div>
+              <div id="market-list-status" class="market-list-status" role="status">正在加载交易对…</div>
+              <div id="market-list" class="market-list" role="list" aria-label="可选择的交易对"></div>
+            </aside>
+            <div class="market-main">
+              <div class="panel market-workspace">
+                <div class="market-toolbar"><div class="market-selected"><small>当前交易对</small><strong id="selected-pair">BTC / USDT</strong><span id="symbol-hint">选择左侧币种，或在下方输入交易对</span></div><div class="toolbar-actions" aria-label="K 线周期"><button type="button" class="interval-button" data-interval="15m">15分</button><button type="button" class="interval-button" data-interval="1h">1时</button><button type="button" class="interval-button" data-interval="4h">4时</button><button type="button" class="interval-button active" data-interval="1d">日线</button><select id="interval" aria-label="K 线周期" hidden><option value="15m">15m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d" selected>1d</option></select></div><div class="toolbar-actions" aria-label="图表样式"><button type="button" class="chart-style active" data-chart-style="candle">K线</button><button type="button" class="chart-style" data-chart-style="line">折线</button></div></div>
+                <div class="market-range-controls"><div class="range-presets" aria-label="快捷日期范围"><button type="button" data-days="7">近7天</button><button type="button" data-days="30">近30天</button><button type="button" data-days="90" class="active">近90天</button><button type="button" data-days="365">近1年</button></div><details class="manual-range"><summary>自定义日期</summary><div class="manual-range-fields"><label>交易对<input id="symbol" value="BTCUSDT" autocomplete="off" placeholder="例如 BTCUSDT"></label><label>开始（UTC）<input id="start" type="date"></label><label>结束（不含，UTC）<input id="end" type="date"></label><button id="load-market" class="primary">加载区间</button></div></details></div>
+                <div class="chart-header"><div><h2>行情与信号</h2><span id="ohlc-readout" class="hint">拖动图表平移，滚轮缩放；悬停查看 K 线</span></div><div class="chart-tools"><button id="chart-zoom-in" type="button" aria-label="放大图表">＋</button><button id="chart-zoom-out" type="button" aria-label="缩小图表">－</button><button id="chart-fit" type="button">适应全部</button></div></div>
+                <div id="chart" role="img" aria-label="可拖动和缩放的现货价格及成交量图"></div>
+                <div class="range-navigator"><div class="range-navigator-head"><strong>拖动两端选择研究区间</strong><span id="range-readout">加载行情后可选</span></div><div class="range-track"><svg id="range-overview" viewBox="0 0 600 54" preserveAspectRatio="none" aria-hidden="true"></svg><div id="range-selection" class="range-selection"></div><input id="range-start" type="range" min="0" max="100" value="0" aria-label="研究区间开始"><input id="range-end" type="range" min="0" max="100" value="100" aria-label="研究区间结束"></div></div>
+                <div class="chart-credit">Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView</a></div>
+              </div>
+              <div class="statgrid market-stats"><div class="stat"><small>交易对</small><strong id="stat-symbol">—</strong><span>币安现货</span></div><div class="stat"><small>数据覆盖</small><strong id="stat-count">—</strong><span>连续 K 线</span></div><div class="stat"><small>数据来源</small><strong id="stat-source">—</strong><span id="stat-time">等待加载</span></div></div>
+              <div class="insight-heading"><div><h2>从历史数据得到的线索</h2><p class="hint">观察量价形态；这些图不能识别聪明钱或证明涨跌原因。</p></div><span class="pill subtle">可悬停查看历史值</span></div>
+              <div class="insight-grid"><div class="panel insight-card" id="insight-momentum"><div class="insight-card-head"><span>20 根价格涨跌</span><strong>—</strong></div><svg viewBox="0 0 300 100" preserveAspectRatio="none" role="img" aria-label="20 根价格涨跌曲线"></svg><p>当前收盘价相对 20 根前的变化</p></div><div class="panel insight-card" id="insight-volume"><div class="insight-card-head"><span>成交量倍数</span><strong>—</strong></div><svg viewBox="0 0 300 100" preserveAspectRatio="none" role="img" aria-label="成交量相对前 20 根均值的曲线"></svg><p>本根成交量 ÷ 前 20 根平均量</p></div><div class="panel insight-card" id="insight-drawdown"><div class="insight-card-head"><span>距 20 根高点</span><strong>—</strong></div><svg viewBox="0 0 300 100" preserveAspectRatio="none" role="img" aria-label="相对近 20 根最高收盘价的回撤曲线"></svg><p>当前价相对近 20 根最高收盘价</p></div></div>
+              <div class="panel"><div class="paneltitle"><h2>研究须知</h2></div><div class="panelbody"><p class="hint">K 线无法证明真实成交滑点，也无法识别资金来自哪类交易者。图表日期按 UTC；“结束”日期不含当天。回测至少需要 100 根连续 K 线，结果不保证未来收益。</p></div></div>
+            </div>
+          </div>
         </section>
         <section class="page" id="page-strategy">
           <div class="pagehead"><div><div class="eyebrow">STRATEGY LAB</div><h1>把观点写成规则。</h1><p class="subtitle">先记录来源，再用同一段历史数据检验规则。</p></div><span class="pill">模拟交易</span></div>

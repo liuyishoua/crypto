@@ -8,9 +8,11 @@ from crypto_app.market import Candle, MarketData, checksum_candles
 
 
 class MarketClient:
-    def symbols(self, query):
-        items = [SymbolInfo("BTCUSDT", "BTC", "USDT", "TRADING", Decimal("1000")), SymbolInfo("SOLUSDT", "SOL", "USDT", "TRADING", Decimal("200"))]
-        return [item for item in items if query.upper() in item.symbol]
+    catalog_stale = False
+
+    def symbols(self, query, quote="USDT"):
+        items = [SymbolInfo("BTCUSDT", "BTC", "USDT", "TRADING", Decimal("1000"), Decimal("2.5")), SymbolInfo("SOLUSDT", "SOL", "USDT", "TRADING", Decimal("200"), Decimal("-1.5"))]
+        return [item for item in items if query.upper() in item.symbol and (not quote or item.quote == quote)]
 
     def candles(self, symbol, interval, start, end):
         bars = tuple(Candle(datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=i), Decimal(10), Decimal(11), Decimal(9), Decimal(10), Decimal(100)) for i in range(105))
@@ -28,11 +30,16 @@ def client(tmp_path):
 
 def test_search_candles_research_and_backtest(tmp_path):
     browser, headers = client(tmp_path)
-    assert [item["symbol"] for item in browser.get("/api/symbols?q=SOL").json["items"]] == ["SOLUSDT"]
+    listing = browser.get("/api/symbols?q=SOL&quote=USDT").json
+    assert [item["symbol"] for item in listing["items"]] == ["SOLUSDT"]
+    assert listing["items"][0]["change_percent"] == "-1.5"
+    assert listing["stale"] is False
     candles = browser.get("/api/candles?symbol=SOLUSDT&interval=1d&start=2024-01-01&end=2024-04-15")
     assert candles.status_code == 200
     assert len(candles.json["candles"]) == 105
     assert candles.json["source"] == "fixture"
+    assert len(candles.json["insights"]) == 105
+    assert candles.json["insights"][20]["momentum_20"] == 0.0
     research = browser.post("/api/research", headers=headers, json={"kind": "buy_hold", "parameters": {}, "version": "1", "source_url": "https://example.com", "note": "学习记录"})
     assert research.status_code == 201
     result = browser.post("/api/backtests", headers=headers, json={"symbol": "SOLUSDT", "interval": "1d", "start": "2024-01-01", "end": "2024-04-15", "kind": "buy_hold", "parameters": {}, "initial_cash": "1000", "fee_rate": "0.001", "slippage_rate": "0.002"})
@@ -52,6 +59,9 @@ def test_invalid_market_input_is_explained(tmp_path):
     offset = browser.get("/api/candles?symbol=SOLUSDT&interval=1d&start=2024-01-01T08:00%2B08:00&end=2024-04-15")
     assert offset.status_code == 400
     assert "日期必须" in offset.json["error"]
+    oversized = browser.get("/api/candles?symbol=SOLUSDT&interval=15m&start=2024-01-01&end=2024-06-01")
+    assert oversized.status_code == 400
+    assert "3000" in oversized.json["error"]
 
 
 def test_rejects_incomplete_requested_history(tmp_path):
@@ -83,4 +93,9 @@ def test_home_has_chart_and_simulation_status(tmp_path):
     assert "模拟" in page
     assert "数据来源" in page
     assert "TradingView" in page
+    assert 'id="market-list"' in page
+    assert 'id="market-search"' in page
+    assert 'id="range-start"' in page
+    assert 'id="range-end"' in page
+    assert 'id="insight-volume"' in page
     assert browser.get("/static/vendor/lightweight-charts.standalone.production.js").status_code == 200

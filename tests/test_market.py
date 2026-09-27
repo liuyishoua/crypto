@@ -59,30 +59,62 @@ class Response:
 class Session:
     def __init__(self):
         self.fail = False
+        self.urls = []
 
     def get(self, url, **kwargs):
+        self.urls.append(url)
         if self.fail:
             raise OSError("offline")
         if url.endswith("exchangeInfo"):
             return Response({"symbols": [
                 {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
                 {"symbol": "SOLUSDT", "baseAsset": "SOL", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
+                {"symbol": "DOGEBTC", "baseAsset": "DOGE", "quoteAsset": "BTC", "status": "TRADING", "isSpotTradingAllowed": True},
             ]})
         if url.endswith("ticker/24hr"):
-            return Response([{"symbol": "SOLUSDT", "quoteVolume": "123456.78"}])
+            return Response([{"symbol": "BTCUSDT", "quoteVolume": "1000", "priceChangePercent": "1.5"}, {"symbol": "SOLUSDT", "quoteVolume": "123456.78", "priceChangePercent": "-2.5"}])
         return Response([])
 
 
-def test_searches_altcoins_and_reports_stale_cache():
+def test_browses_active_usdt_pairs_by_volume_and_keeps_stale_catalog():
     session = Session()
     client = BinancePublicClient(session=session)
+    assert [item.symbol for item in client.symbols("")] == ["SOLUSDT", "BTCUSDT"]
     assert [item.symbol for item in client.symbols("sol")] == ["SOLUSDT"]
     assert client.symbols("sol")[0].quote_volume == Decimal("123456.78")
+    assert client.symbols("sol")[0].change_percent == Decimal("-2.5")
+    assert all(url.startswith("https://data-api.binance.vision/") for url in session.urls)
+    assert len(session.urls) == 2
     session.fail = True
-    with pytest.raises(MarketUnavailable) as error:
-        client.symbols("sol")
-    assert error.value.cached_at is not None
-    assert "offline" in str(error.value)
+    client._symbols_at = datetime(2020, 1, 1, tzinfo=UTC)
+    assert client.symbols("sol")[0].symbol == "SOLUSDT"
+    assert client.catalog_stale is True
+    assert [item.symbol for item in client.symbols("doge", quote="BTC")] == ["DOGEBTC"]
+
+
+def test_catalog_error_without_cache_is_explicit():
+    session = Session()
+    session.fail = True
+    with pytest.raises(MarketUnavailable, match="交易对目录不可用"):
+        BinancePublicClient(session=session).symbols("")
+
+
+def test_search_prioritizes_exact_base_over_volume():
+    class SearchSession(Session):
+        def get(self, url, **kwargs):
+            if url.endswith("exchangeInfo"):
+                return Response({"symbols": [
+                    {"symbol": "SOLUSDT", "baseAsset": "SOL", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
+                    {"symbol": "RESOLVUSDT", "baseAsset": "RESOLV", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
+                ]})
+            if url.endswith("ticker/24hr"):
+                return Response([
+                    {"symbol": "SOLUSDT", "quoteVolume": "100", "priceChangePercent": "1"},
+                    {"symbol": "RESOLVUSDT", "quoteVolume": "100000", "priceChangePercent": "2"},
+                ])
+            return super().get(url, **kwargs)
+
+    assert [item.symbol for item in BinancePublicClient(session=SearchSession()).symbols("sol")][:2] == ["SOLUSDT", "RESOLVUSDT"]
 
 
 def test_market_cache_keeps_identity_and_source(tmp_path):

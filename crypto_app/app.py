@@ -15,6 +15,7 @@ from .backtest import load_backtest, run_backtest, save_backtest
 from .binance_account import BinanceAccountSource
 from .binance_public import BinancePublicClient, MarketUnavailable
 from .market import INTERVALS, load_market_cache, save_market_cache
+from .insights import calculate_insights
 from .onchain import OnchainSource, validate_address
 from .research import save_research
 from .secrets import SecretStore
@@ -108,6 +109,8 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
             raise ValueError("日期必须为 YYYY-MM-DD") from error
         if start >= end:
             raise ValueError("日期范围无效")
+        if (end - start) / INTERVALS[interval] > 3000:
+            raise ValueError("一次最多加载 3000 根 K 线，请缩短日期范围或选择更长周期")
         try:
             data = app.extensions["market_client"].candles(symbol, interval, start, end)
         except MarketUnavailable as error:
@@ -121,15 +124,16 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
 
     @app.get("/api/symbols")
     def symbols():
-        items = app.extensions["market_client"].symbols(request.args.get("q", ""))
-        return jsonify(items=[{"symbol": item.symbol, "base": item.base, "quote": item.quote, "status": item.status, "quote_volume": str(item.quote_volume) if item.quote_volume is not None else None} for item in items])
+        market_client = app.extensions["market_client"]
+        items = market_client.symbols(request.args.get("q", ""), quote=request.args.get("quote", "USDT").upper())
+        return jsonify(items=[{"symbol": item.symbol, "base": item.base, "quote": item.quote, "status": item.status, "quote_volume": str(item.quote_volume) if item.quote_volume is not None else None, "change_percent": str(item.change_percent) if item.change_percent is not None else None} for item in items], stale=getattr(market_client, "catalog_stale", False))
 
     @app.get("/api/candles")
     def candles():
         data = market_request(request.args)
         if not data.source.startswith("cache:"):
             save_market_cache(app.extensions["store"], data)
-        return jsonify(symbol=data.symbol, interval=data.interval, source=data.source, fetched_at=data.fetched_at.isoformat(), checksum=data.checksum, candles=[{"time": int(bar.open_at.timestamp()), "open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": str(bar.volume)} for bar in data.candles])
+        return jsonify(symbol=data.symbol, interval=data.interval, source=data.source, fetched_at=data.fetched_at.isoformat(), checksum=data.checksum, candles=[{"time": int(bar.open_at.timestamp()), "open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": str(bar.volume)} for bar in data.candles], insights=calculate_insights(data.candles))
 
     @app.post("/api/research")
     def research():
