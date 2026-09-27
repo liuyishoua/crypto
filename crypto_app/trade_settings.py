@@ -77,8 +77,10 @@ class TradeSettingsStore:
         daily = _positive(daily_limit)
         if daily < per:
             raise ValueError("单日限额不能小于单笔限额")
+        configured = TradeSettings(True, per, daily, _hash_unlock(passphrase))
+        self._save(TradeSettings(False, per, daily, configured.passphrase_hash))
         self.secrets.save("binance_trade", {"key": key, "secret": secret})
-        self._save(TradeSettings(True, per, daily, _hash_unlock(passphrase)))
+        self._save(configured)
 
     def disable(self):
         saved = self.load()

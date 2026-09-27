@@ -82,3 +82,14 @@ def test_read_key_endpoint_never_returns_secret(tmp_path):
     assert response.status_code == 200
     assert account.connected
     assert "private-secret" not in response.get_data(as_text=True)
+
+
+def test_failed_binance_sync_exposes_last_success_time(tmp_path):
+    class FailingAccount:
+        last_success = NOW
+        def balances(self): raise OSError("offline")
+
+    app = create_app(tmp_path, account_source=FailingAccount(), onchain_source=Onchain(), price_client=Prices())
+    data = app.test_client().get("/api/assets").json
+    assert data["errors"]["binance-spot"]
+    assert data["last_success"]["binance-spot"] == NOW.isoformat()

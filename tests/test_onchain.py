@@ -68,6 +68,26 @@ def test_indexer_failure_keeps_known_balances_and_warning():
     assert len(snapshot.items) == 2
 
 
+def test_indexer_failure_preserves_last_complete_discovery_time():
+    indexer = Indexer()
+    source = OnchainSource(lambda chain_id: Chain(chain_id), indexer, {})
+    first = source.assets(ADDRESS, 1)
+    indexer.fail = True
+    source.assets(ADDRESS, 1)
+    assert source.last_success[(ADDRESS, 1)] == first.observed_at
+
+
+def test_bad_token_does_not_hide_native_balance():
+    class BrokenChain(Chain):
+        def contract(self, address, abi): raise OSError("token RPC failed")
+
+    source = OnchainSource(lambda chain_id: BrokenChain(chain_id), Indexer(), {})
+    snapshot = source.assets(ADDRESS, 1)
+    assert snapshot.items[0].symbol == "ETH"
+    assert not snapshot.discovery_complete
+    assert "token RPC failed" in snapshot.error
+
+
 def test_rejects_bad_address_and_chain():
     with pytest.raises(ValueError):
         validate_address("0x123")

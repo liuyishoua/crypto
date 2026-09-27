@@ -68,6 +68,8 @@ class Session:
                 {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
                 {"symbol": "SOLUSDT", "baseAsset": "SOL", "quoteAsset": "USDT", "status": "TRADING", "isSpotTradingAllowed": True},
             ]})
+        if url.endswith("ticker/24hr"):
+            return Response([{"symbol": "SOLUSDT", "quoteVolume": "123456.78"}])
         return Response([])
 
 
@@ -75,6 +77,7 @@ def test_searches_altcoins_and_reports_stale_cache():
     session = Session()
     client = BinancePublicClient(session=session)
     assert [item.symbol for item in client.symbols("sol")] == ["SOLUSDT"]
+    assert client.symbols("sol")[0].quote_volume == Decimal("123456.78")
     session.fail = True
     with pytest.raises(MarketUnavailable) as error:
         client.symbols("sol")
@@ -116,3 +119,34 @@ def test_public_archive_day_parses_binance_csv():
     assert len(data.candles) == 1
     assert data.candles[0].open == Decimal("10")
     assert data.source == "binance-public-data"
+
+
+def test_public_archive_uses_microsecond_timestamps_after_2025():
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr("SOLUSDT-1d-2025-01-01.csv", "1735689600000000,10,12,9,11,100,1735775999999999,0,0,0,0,0\n")
+
+    class ArchiveSession:
+        def get(self, url, **kwargs):
+            response = Response(None)
+            response.content = buffer.getvalue()
+            return response
+
+    data = BinancePublicClient(session=ArchiveSession()).archive_day("SOLUSDT", "1d", datetime(2025, 1, 1, tzinfo=UTC).date())
+    assert data.candles[0].open_at == datetime(2025, 1, 1, tzinfo=UTC)
+
+
+def test_full_historical_month_uses_archive():
+    class ArchiveClient(BinancePublicClient):
+        def archive_month(self, symbol, interval, year, month):
+            assert (symbol, interval, year, month) == ("SOLUSDT", "1h", 2024, 2)
+            start = datetime(2024, 2, 1, tzinfo=UTC)
+            bars = tuple(Candle(start + timedelta(hours=i), Decimal(10), Decimal(12), Decimal(9), Decimal(11), Decimal(100)) for i in range(29 * 24))
+            return MarketData("binance", "spot", symbol, interval, bars, "binance-public-data", start, checksum_candles(bars))
+
+    class NoRest:
+        def get(self, *_args, **_kwargs): raise AssertionError("monthly history should use archive")
+
+    data = ArchiveClient(session=NoRest()).candles("SOLUSDT", "1h", datetime(2024, 2, 1, tzinfo=UTC), datetime(2024, 3, 1, tzinfo=UTC))
+    assert data.source == "binance-public-data"
+    assert len(data.candles) == 29 * 24

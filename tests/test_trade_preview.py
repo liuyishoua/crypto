@@ -65,3 +65,14 @@ def test_rejects_closed_pair_balance_and_daily_limit():
     with pytest.raises(ValueError): preview_order(order, exchange, SETTINGS, NOW)
     exchange.usdt = Decimal("500")
     with pytest.raises(ValueError): preview_order(order, exchange, SETTINGS, NOW, daily_used=Decimal("450"))
+
+
+def test_market_specific_lot_size_is_applied():
+    class MarketExchange(Exchange):
+        def rules(self, symbol):
+            result = super().rules(symbol)
+            result.update(market_min_qty="0.01", market_max_qty="1", market_step_size="0.01")
+            return result
+
+    with pytest.raises(ValueError):
+        preview_order(ManualOrderIntent("BTCUSDT", "BUY", "MARKET", Decimal("0.105"), None), MarketExchange(), SETTINGS, NOW)

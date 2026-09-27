@@ -24,19 +24,34 @@ class Rest:
     def delete_order(self, **kwargs): self.calls.append(("cancel", kwargs)); return Response({"status": "CANCELED", "orderId": 12, "executedQty": "0.5"})
 
 
+class WalletRest:
+    withdrawals = False
+    def get_api_key_permission(self): return Response({"enableReading": True, "enableSpotAndMarginTrading": True, "enableWithdrawals": self.withdrawals})
+
+
 def test_sdk_adapter_maps_rules_and_uses_client_id(tmp_path):
     secrets = SecretStore(tmp_path, Fernet.generate_key())
     secrets.save("binance_trade", {"key": "key", "secret": "secret"})
     rest = Rest()
-    sdk = lambda key, secret: (type("Spot", (), {"rest_api": rest})(), None)
+    wallet_rest = WalletRest()
+    sdk = lambda key, secret: (type("Spot", (), {"rest_api": rest})(), type("Wallet", (), {"rest_api": wallet_rest})())
     gateway = BinanceTradeGateway(secrets, sdk)
     assert gateway.rules("BTCUSDT")["step_size"] == "0.001"
     assert gateway.price("BTCUSDT") == Decimal("100")
     assert gateway.available("USDT") == Decimal("200")
     intent = ManualOrderIntent("BTCUSDT", "BUY", "LIMIT", Decimal("1"), Decimal("100"))
     gateway.test_order(intent)
+    assert rest.calls[-1][1]["quantity"] == "1"
+    assert rest.calls[-1][1]["price"] == "100"
     assert gateway.place_order(intent, "client-1")["status"] == "NEW"
     assert rest.calls[-1][1]["new_client_order_id"] == "client-1"
     assert gateway.get_order("BTCUSDT", "client-1")["executed_qty"] == "1"
     gateway.cancel_order("BTCUSDT", "client-1")
     assert rest.calls[-1][1]["orig_client_order_id"] == "client-1"
+    wallet_rest.withdrawals = True
+    try:
+        gateway.place_order(intent, "client-2")
+        assert False, "withdrawal-enabled key must be blocked"
+    except ValueError:
+        pass
+    assert not any(name == "new" and payload.get("new_client_order_id") == "client-2" for name, payload in rest.calls)

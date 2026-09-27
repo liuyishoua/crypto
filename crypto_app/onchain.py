@@ -68,6 +68,7 @@ class OnchainSource:
         self.web3_factory = web3_factory
         self.indexer = indexer or BlockscoutIndexer()
         self.known_tokens = known_tokens or {}
+        self.last_success = {}
 
     def assets(self, address: str, chain_id: int) -> AssetSnapshot:
         if chain_id not in RPC_URLS:
@@ -90,9 +91,15 @@ class OnchainSource:
         for contract, token in tokens.items():
             if not Web3.is_address(token.contract) or not 0 <= token.decimals <= 36:
                 continue
-            instance = web3.eth.contract(address=Web3.to_checksum_address(token.contract), abi=ERC20_ABI)
-            raw = instance.functions.balanceOf(address).call()
-            quantity = Decimal(raw) / Decimal(10**token.decimals)
-            if quantity:
-                items.append(AssetBalance("onchain", chain_id, contract, token.symbol, quantity, observed_at))
+            try:
+                instance = web3.eth.contract(address=Web3.to_checksum_address(token.contract), abi=ERC20_ABI)
+                raw = instance.functions.balanceOf(address).call()
+                quantity = Decimal(raw) / Decimal(10**token.decimals)
+                if quantity:
+                    items.append(AssetBalance("onchain", chain_id, contract, token.symbol, quantity, observed_at))
+            except Exception as exc:
+                discovery_complete = False
+                error = f"{error + '; ' if error else ''}代币余额读取失败: {exc}"
+        if discovery_complete:
+            self.last_success[(address, chain_id)] = observed_at
         return AssetSnapshot(items, observed_at, discovery_complete, error)

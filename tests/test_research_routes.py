@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from crypto_app.app import create_app
 from crypto_app.binance_public import SymbolInfo
+from crypto_app.binance_public import MarketUnavailable
 from crypto_app.market import Candle, MarketData, checksum_candles
 
 
@@ -48,6 +49,31 @@ def test_invalid_market_input_is_explained(tmp_path):
     response = browser.get("/api/candles?symbol=BAD!&interval=1d&start=x&end=y")
     assert response.status_code == 400
     assert "error" in response.json
+    offset = browser.get("/api/candles?symbol=SOLUSDT&interval=1d&start=2024-01-01T08:00%2B08:00&end=2024-04-15")
+    assert offset.status_code == 400
+    assert "日期必须" in offset.json["error"]
+
+
+def test_rejects_incomplete_requested_history(tmp_path):
+    browser, headers = client(tmp_path)
+    result = browser.post("/api/backtests", headers=headers, json={"symbol": "SOLUSDT", "interval": "1d", "start": "2024-01-01", "end": "2024-04-20", "kind": "buy_hold", "parameters": {}, "initial_cash": "1000"})
+    assert result.status_code == 400
+    assert "覆盖" in result.json["error"]
+
+
+def test_network_failure_reuses_timestamped_cache(tmp_path):
+    market = MarketClient()
+    app = create_app(tmp_path, market_client=market)
+    browser = app.test_client()
+    path = "/api/candles?symbol=SOLUSDT&interval=1d&start=2024-01-01&end=2024-04-15"
+    first = browser.get(path)
+    assert first.status_code == 200
+    def offline(*_args): raise MarketUnavailable("offline")
+    market.candles = offline
+    cached = browser.get(path)
+    assert cached.status_code == 200
+    assert cached.json["source"].startswith("cache:")
+    assert cached.json["fetched_at"] == first.json["fetched_at"]
 
 
 def test_home_has_chart_and_simulation_status(tmp_path):

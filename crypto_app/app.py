@@ -3,7 +3,8 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+import threading
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,29 +14,40 @@ from flask import Flask, jsonify, render_template, request
 from .backtest import load_backtest, run_backtest, save_backtest
 from .binance_account import BinanceAccountSource
 from .binance_public import BinancePublicClient, MarketUnavailable
-from .market import INTERVALS, save_market_cache
+from .market import INTERVALS, load_market_cache, save_market_cache
 from .onchain import OnchainSource, validate_address
 from .research import save_research
 from .secrets import SecretStore
 from .store import open_store
 from .strategy import StrategySpec
+from .trade_execution import TradeService
+from .trade_gateway import BinanceTradeGateway
+from .trade_preview import ManualOrderIntent
+from .trade_settings import TradeSettingsStore
 from .valuation import CoinGeckoPriceClient, quote_usd, summarize_assets
 
 
-def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None) -> Flask:
+def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None, trade_gateway=None) -> Flask:
     app = Flask(__name__)
+    app.extensions["draining"] = threading.Event()
     app.config.update(BIND_HOST="127.0.0.1", TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
     app.extensions["store"] = open_store(Path(runtime_dir))
     app.extensions["market_client"] = market_client or BinancePublicClient()
     master_key = os.environ.get("CRYPTO_MASTER_KEY", "").encode()
-    app.extensions["account_source"] = account_source if account_source is not None else (BinanceAccountSource(SecretStore(Path(runtime_dir), master_key)) if master_key else None)
+    secret_store = SecretStore(Path(runtime_dir), master_key) if master_key else None
+    app.extensions["account_source"] = account_source if account_source is not None else (BinanceAccountSource(secret_store) if secret_store else None)
     app.extensions["onchain_source"] = onchain_source or OnchainSource()
     app.extensions["price_client"] = price_client or CoinGeckoPriceClient()
+    app.extensions["trade_service"] = TradeService(app.extensions["store"], TradeSettingsStore(Path(runtime_dir), secret_store), trade_gateway or BinanceTradeGateway(secret_store)) if secret_store else None
+    if secret_store and secret_store.load("binance_trade"):
+        app.extensions["trade_service"].recover()
 
     @app.before_request
     def guard_writes():
         if request.method in ("GET", "HEAD", "OPTIONS"):
             return None
+        if app.extensions["draining"].is_set():
+            return jsonify(error="服务正在关闭，暂不接受新写入"), 503
         origin = request.headers.get("Origin", "")
         parsed = urlsplit(origin)
         token = request.headers.get("X-CSRF-Token", "")
@@ -88,13 +100,24 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
         if not re.fullmatch(r"[A-Z0-9]{4,24}", symbol) or interval not in INTERVALS:
             raise ValueError("交易对或 K 线周期无效")
         try:
-            start = datetime.fromisoformat(payload["start"]).replace(tzinfo=timezone.utc)
-            end = datetime.fromisoformat(payload["end"]).replace(tzinfo=timezone.utc)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", payload["start"]) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", payload["end"]):
+                raise ValueError("日期格式无效")
+            start = datetime.combine(date.fromisoformat(payload["start"]), datetime.min.time(), timezone.utc)
+            end = datetime.combine(date.fromisoformat(payload["end"]), datetime.min.time(), timezone.utc)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("日期必须为 YYYY-MM-DD") from error
         if start >= end:
             raise ValueError("日期范围无效")
-        return app.extensions["market_client"].candles(symbol, interval, start, end)
+        try:
+            data = app.extensions["market_client"].candles(symbol, interval, start, end)
+        except MarketUnavailable as error:
+            cached = load_market_cache(app.extensions["store"], "binance", "spot", symbol, interval, start, end - INTERVALS[interval])
+            if cached is None:
+                raise error
+            data = cached._replace(source="cache:" + cached.source)
+        if not data.candles or data.candles[0].open_at != start or data.candles[-1].open_at + INTERVALS[interval] < end:
+            raise ValueError("历史数据未覆盖所请求的完整区间，请缩短日期范围")
+        return data
 
     @app.get("/api/symbols")
     def symbols():
@@ -104,7 +127,8 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
     @app.get("/api/candles")
     def candles():
         data = market_request(request.args)
-        save_market_cache(app.extensions["store"], data)
+        if not data.source.startswith("cache:"):
+            save_market_cache(app.extensions["store"], data)
         return jsonify(symbol=data.symbol, interval=data.interval, source=data.source, fetched_at=data.fetched_at.isoformat(), checksum=data.checksum, candles=[{"time": int(bar.open_at.timestamp()), "open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": str(bar.volume)} for bar in data.candles])
 
     @app.post("/api/research")
@@ -130,7 +154,8 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
     def backtests():
         body = request.get_json(silent=True) or {}
         data = market_request(body)
-        save_market_cache(app.extensions["store"], data)
+        if not data.source.startswith("cache:"):
+            save_market_cache(app.extensions["store"], data)
         spec = StrategySpec(str(body.get("kind", "buy_hold")), body.get("parameters", {}), "1", str(body.get("source_url", "https://example.org/own-rule")), str(body.get("note", "")))
         result = run_backtest(data, spec, Decimal(str(body.get("initial_cash", "1000"))), Decimal(str(body.get("fee_rate", "0.001"))), Decimal(str(body.get("slippage_rate", "0.001"))))
         record_id = save_backtest(app.extensions["store"], result)
@@ -154,12 +179,16 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
         balances = []
         errors = {}
         discovery = {}
+        last_success = {}
         source = app.extensions["account_source"]
         if source is not None:
             try:
                 balances.extend(source.balances())
             except Exception:
                 errors["binance-spot"] = "币安余额暂不可用；请检查连接与同步状态"
+            success_at = getattr(source, "last_success", None)
+            if success_at:
+                last_success["binance-spot"] = success_at.isoformat()
         address = request.args.get("address", "").strip()
         if address:
             address = validate_address(address)
@@ -168,13 +197,87 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
                     snapshot = app.extensions["onchain_source"].assets(address, chain_id)
                     balances.extend(snapshot.items)
                     discovery[str(chain_id)] = {"complete": snapshot.discovery_complete, "error": snapshot.error, "observed_at": snapshot.observed_at.isoformat()}
+                    success_at = getattr(app.extensions["onchain_source"], "last_success", {}).get((address, chain_id))
+                    if success_at:
+                        last_success[str(chain_id)] = success_at.isoformat()
                 except Exception:
                     discovery[str(chain_id)] = {"complete": False, "error": "链上服务暂不可用", "observed_at": None}
+                    success_at = getattr(app.extensions["onchain_source"], "last_success", {}).get((address, chain_id))
+                    if success_at:
+                        last_success[str(chain_id)] = success_at.isoformat()
         summary = summarize_assets(quote_usd(balances, app.extensions["price_client"]))
         groups = {"binance-spot": [], "onchain": []}
         for item in summary.items:
             row = {"source": item.balance.source, "chain_id": item.balance.chain_id, "contract": item.balance.contract, "symbol": item.balance.symbol, "quantity": str(item.balance.quantity), "observed_at": item.balance.observed_at.isoformat(), "price_usd": str(item.price_usd) if item.price_usd is not None else None, "value_usd": str(item.value_usd) if item.value_usd is not None else None, "price_source": item.price_source, "price_at": item.price_at.isoformat() if item.price_at else None}
             groups[item.balance.source].append(row)
-        return jsonify(groups=groups, total_usd=str(summary.total_usd), unpriced_count=summary.unpriced_count, discovery=discovery, errors=errors, excluded="NFT、流动性池份额、借贷债务和跨链桥在途资产未计入总额")
+        return jsonify(groups=groups, total_usd=str(summary.total_usd), unpriced_count=summary.unpriced_count, discovery=discovery, errors=errors, last_success=last_success, excluded="NFT、流动性池份额、借贷债务和跨链桥在途资产未计入总额")
+
+    def trading():
+        service = app.extensions["trade_service"]
+        if service is None:
+            raise ValueError("请先在服务环境设置 CRYPTO_MASTER_KEY")
+        return service
+
+    def order_payload(order):
+        return order.__dict__
+
+    @app.get("/api/trade/settings")
+    def trade_settings():
+        service = trading()
+        settings = service.settings.load()
+        return jsonify(enabled=settings.enabled, per_order_limit=str(settings.per_order_limit), daily_limit=str(settings.daily_limit))
+
+    @app.post("/api/trade/settings")
+    def configure_trading():
+        service = trading()
+        body = request.get_json(silent=True) or {}
+        key, secret = str(body.get("key", "")), str(body.get("secret", ""))
+        if not key or not secret:
+            raise ValueError("交易 API Key 和 Secret 均不能为空")
+        with service.lock:
+            previous = service.settings.secrets.load("binance_trade")
+            if previous and previous != {"key": key, "secret": secret} and any(order.status not in ("FILLED", "CANCELED", "REJECTED", "EXPIRED") for order in service.list()):
+                raise ValueError("存在未结束订单，请先核实并处理后再更换交易密钥")
+            permissions = service.gateway.permissions(key, secret)
+            service.settings.configure(key, secret, permissions, str(body.get("passphrase", "")), body.get("per_order_limit"), body.get("daily_limit"))
+            service.audit("trading_enabled")
+        return jsonify(enabled=True)
+
+    @app.post("/api/trade/settings/disable")
+    def disable_trading():
+        service = trading()
+        service.settings.disable()
+        service.audit("trading_disabled")
+        return jsonify(enabled=False)
+
+    @app.post("/api/trade/previews")
+    def create_preview():
+        body = request.get_json(silent=True) or {}
+        try:
+            quantity = Decimal(str(body.get("quantity", "")))
+            limit_price = Decimal(str(body["limit_price"])) if body.get("limit_price") not in (None, "") else None
+        except Exception as error:
+            raise ValueError("数量或限价无效") from error
+        intent = ManualOrderIntent(str(body.get("symbol", "")).upper(), str(body.get("side", "")).upper(), str(body.get("type", "")).upper(), quantity, limit_price)
+        result = trading().preview(intent)
+        return jsonify(id=result.id, symbol=intent.symbol, side=intent.side, type=intent.type, quantity=str(intent.quantity), limit_price=str(intent.limit_price) if intent.limit_price is not None else None, quote=str(result.quote), estimated_notional=str(result.estimated_notional), estimated_fee=str(result.estimated_fee), estimated_slippage=str(result.estimated_slippage), expires_at=result.expires_at.isoformat(), per_order_limit=str(trading().settings.load().per_order_limit), daily_limit=str(trading().settings.load().daily_limit)), 201
+
+    @app.post("/api/trade/previews/<preview_id>/confirm")
+    def confirm_preview(preview_id):
+        body = request.get_json(silent=True) or {}
+        return jsonify(order_payload(trading().confirm(preview_id, str(body.get("passphrase", "")))))
+
+    @app.get("/api/trade/orders")
+    def list_trade_orders():
+        return jsonify(items=[order_payload(order) for order in trading().list()])
+
+    @app.get("/api/trade/orders/<client_order_id>")
+    def get_trade_order(client_order_id):
+        return jsonify(order_payload(trading().reconcile(client_order_id)))
+
+    @app.post("/api/trade/orders/<client_order_id>/cancel")
+    def cancel_trade_order(client_order_id):
+        body = request.get_json(silent=True) or {}
+        return jsonify(order_payload(trading().cancel(client_order_id, str(body.get("passphrase", "")))))
 
     return app

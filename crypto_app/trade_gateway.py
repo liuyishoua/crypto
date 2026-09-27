@@ -24,10 +24,14 @@ class BinanceTradeGateway:
         raw = _dict(wallet.rest_api.get_api_key_permission().data())
         return {"enableReading": raw.get("enableReading"), "enableSpotAndMarginTrading": raw.get("enableSpotAndMarginTrading"), "enableWithdrawals": raw.get("enableWithdrawals")}
 
-    def _rest(self):
+    def _rest(self, *, for_write=False):
         credential = self.secrets.load("binance_trade")
         if not credential:
             raise ValueError("尚未配置交易密钥")
+        if for_write:
+            permission = self.permissions(credential["key"], credential["secret"])
+            if not permission["enableReading"] or not permission["enableSpotAndMarginTrading"] or permission["enableWithdrawals"]:
+                raise ValueError("交易密钥权限已变化；请关闭提现并重新检查密钥")
         spot, _ = self.sdk_factory(credential["key"], credential["secret"])
         return spot.rest_api
 
@@ -46,7 +50,10 @@ class BinanceTradeGateway:
         if not lot or not price or not (notional or minimum):
             raise ValueError("交易所过滤规则不完整")
         # MARKET_LOT_SIZE may contain disabled zero fields; LOT_SIZE is the safe fallback.
-        return {"symbol": symbol, "status": item.get("status") if item.get("isSpotTradingAllowed", True) else "DISABLED", "base": item["baseAsset"], "quote": item["quoteAsset"], "min_qty": lot["minQty"], "max_qty": lot["maxQty"], "step_size": lot["stepSize"], "market_min_qty": market_lot.get("minQty", "0"), "market_max_qty": market_lot.get("maxQty", "0"), "market_step_size": market_lot.get("stepSize", "0"), "min_price": price["minPrice"], "max_price": price["maxPrice"], "tick_size": price["tickSize"], "min_notional": notional.get("minNotional") or minimum.get("minNotional") or "0", "max_notional": notional.get("maxNotional") or "1000000000000"}
+        maximum = notional.get("maxNotional")
+        if maximum is None or Decimal(str(maximum)) == 0:
+            maximum = "1000000000000"
+        return {"symbol": symbol, "status": item.get("status") if item.get("isSpotTradingAllowed", True) else "DISABLED", "base": item["baseAsset"], "quote": item["quoteAsset"], "min_qty": lot["minQty"], "max_qty": lot["maxQty"], "step_size": lot["stepSize"], "market_min_qty": market_lot.get("minQty", "0"), "market_max_qty": market_lot.get("maxQty", "0"), "market_step_size": market_lot.get("stepSize", "0"), "min_price": price["minPrice"], "max_price": price["maxPrice"], "tick_size": price["tickSize"], "min_notional": notional.get("minNotional") or minimum.get("minNotional") or "0", "max_notional": maximum}
 
     def price(self, symbol):
         return Decimal(str(_dict(self._rest().ticker_price(symbol=symbol).data())["price"]))
@@ -60,24 +67,26 @@ class BinanceTradeGateway:
         return Decimal(0)
 
     def _order_args(self, intent, client_id=None):
-        args = {"symbol": intent.symbol, "side": intent.side, "type": intent.type, "quantity": float(intent.quantity)}
+        # The SDK serializes these values directly into signed request parameters.
+        # Decimal strings retain exchange step precision that floats would lose.
+        args = {"symbol": intent.symbol, "side": intent.side, "type": intent.type, "quantity": str(intent.quantity)}
         if intent.type == "LIMIT":
-            args.update(time_in_force="GTC", price=float(intent.limit_price))
+            args.update(time_in_force="GTC", price=str(intent.limit_price))
         if client_id:
             args["new_client_order_id"] = client_id
         return args
 
     def test_order(self, intent):
-        self._rest().order_test(**self._order_args(intent)).data()
+        self._rest(for_write=True).order_test(**self._order_args(intent)).data()
 
     def place_order(self, intent, client_id):
-        return self._status(self._rest().new_order(**self._order_args(intent, client_id)).data())
+        return self._status(self._rest(for_write=True).new_order(**self._order_args(intent, client_id)).data())
 
     def get_order(self, symbol, client_id):
         return self._status(self._rest().get_order(symbol=symbol, orig_client_order_id=client_id).data())
 
     def cancel_order(self, symbol, client_id):
-        return self._status(self._rest().delete_order(symbol=symbol, orig_client_order_id=client_id).data())
+        return self._status(self._rest(for_write=True).delete_order(symbol=symbol, orig_client_order_id=client_id).data())
 
     @staticmethod
     def _status(raw):

@@ -36,3 +36,15 @@ def test_rejects_unsafe_settings(tmp_path, permission, phrase, per, daily):
     with pytest.raises(ValueError):
         settings.configure("trade", "secret", permission, phrase, per, daily)
     assert not settings.load().enabled
+
+
+def test_failed_secret_rotation_leaves_trading_disabled(tmp_path):
+    secrets = SecretStore(tmp_path, Fernet.generate_key())
+    settings = TradeSettingsStore(tmp_path, secrets)
+    permissions = {"enableReading": True, "enableSpotAndMarginTrading": True, "enableWithdrawals": False}
+    settings.configure("old", "old-secret", permissions, "long unlock phrase", "100", "500")
+    def fail_save(*_args): raise OSError("disk full")
+    secrets.save = fail_save
+    with pytest.raises(OSError):
+        settings.configure("new", "new-secret", permissions, "long unlock phrase", "100", "500")
+    assert not settings.load().enabled

@@ -59,11 +59,19 @@ def preview_order(intent: ManualOrderIntent, exchange, settings: TradeSettings, 
     rules = exchange.rules(intent.symbol)
     if rules["status"] != "TRADING" or rules["symbol"] != intent.symbol:
         raise ValueError("交易对当前不可交易")
+    if rules["quote"] != "USDT":
+        raise ValueError("首版真实交易仅支持 USDT 报价交易对")
     min_qty = _decimal(rules["min_qty"], "最小数量")
     max_qty = _decimal(rules["max_qty"], "最大数量")
     step = _decimal(rules["step_size"], "数量步进")
     if quantity < min_qty or quantity > max_qty or quantity % step != 0:
         raise ValueError("数量不符合交易所过滤规则")
+    if intent.type == "MARKET":
+        market_min = Decimal(str(rules.get("market_min_qty", "0")))
+        market_max = Decimal(str(rules.get("market_max_qty", "0")))
+        market_step = Decimal(str(rules.get("market_step_size", "0")))
+        if (market_min > 0 and quantity < market_min) or (market_max > 0 and quantity > market_max) or (market_step > 0 and quantity % market_step != 0):
+            raise ValueError("市价数量不符合交易所过滤规则")
     if intent.type == "LIMIT":
         min_price = _decimal(rules["min_price"], "最小价格")
         max_price = _decimal(rules["max_price"], "最大价格")
