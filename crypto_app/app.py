@@ -1,5 +1,6 @@
 import hmac
 import json
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -10,18 +11,26 @@ from urllib.parse import urlsplit
 from flask import Flask, jsonify, render_template, request
 
 from .backtest import load_backtest, run_backtest, save_backtest
+from .binance_account import BinanceAccountSource
 from .binance_public import BinancePublicClient, MarketUnavailable
 from .market import INTERVALS, save_market_cache
+from .onchain import OnchainSource, validate_address
 from .research import save_research
+from .secrets import SecretStore
 from .store import open_store
 from .strategy import StrategySpec
+from .valuation import CoinGeckoPriceClient, quote_usd, summarize_assets
 
 
-def create_app(runtime_dir: Path, market_client=None) -> Flask:
+def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None) -> Flask:
     app = Flask(__name__)
     app.config.update(BIND_HOST="127.0.0.1", TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
     app.extensions["store"] = open_store(Path(runtime_dir))
     app.extensions["market_client"] = market_client or BinancePublicClient()
+    master_key = os.environ.get("CRYPTO_MASTER_KEY", "").encode()
+    app.extensions["account_source"] = account_source if account_source is not None else (BinanceAccountSource(SecretStore(Path(runtime_dir), master_key)) if master_key else None)
+    app.extensions["onchain_source"] = onchain_source or OnchainSource()
+    app.extensions["price_client"] = price_client or CoinGeckoPriceClient()
 
     @app.before_request
     def guard_writes():
@@ -130,5 +139,42 @@ def create_app(runtime_dir: Path, market_client=None) -> Flask:
     @app.get("/api/backtests/<int:record_id>")
     def backtest_record(record_id):
         return jsonify(result_payload(load_backtest(app.extensions["store"], record_id)))
+
+    @app.post("/api/binance/read-credentials")
+    def connect_read_key():
+        source = app.extensions["account_source"]
+        if source is None:
+            return jsonify(error="请先在服务环境设置 CRYPTO_MASTER_KEY"), 503
+        body = request.get_json(silent=True) or {}
+        source.connect(str(body.get("key", "")), str(body.get("secret", "")))
+        return jsonify(status="connected")
+
+    @app.get("/api/assets")
+    def assets():
+        balances = []
+        errors = {}
+        discovery = {}
+        source = app.extensions["account_source"]
+        if source is not None:
+            try:
+                balances.extend(source.balances())
+            except Exception:
+                errors["binance-spot"] = "币安余额暂不可用；请检查连接与同步状态"
+        address = request.args.get("address", "").strip()
+        if address:
+            address = validate_address(address)
+            for chain_id in (1, 56):
+                try:
+                    snapshot = app.extensions["onchain_source"].assets(address, chain_id)
+                    balances.extend(snapshot.items)
+                    discovery[str(chain_id)] = {"complete": snapshot.discovery_complete, "error": snapshot.error, "observed_at": snapshot.observed_at.isoformat()}
+                except Exception:
+                    discovery[str(chain_id)] = {"complete": False, "error": "链上服务暂不可用", "observed_at": None}
+        summary = summarize_assets(quote_usd(balances, app.extensions["price_client"]))
+        groups = {"binance-spot": [], "onchain": []}
+        for item in summary.items:
+            row = {"source": item.balance.source, "chain_id": item.balance.chain_id, "contract": item.balance.contract, "symbol": item.balance.symbol, "quantity": str(item.balance.quantity), "observed_at": item.balance.observed_at.isoformat(), "price_usd": str(item.price_usd) if item.price_usd is not None else None, "value_usd": str(item.value_usd) if item.value_usd is not None else None, "price_source": item.price_source, "price_at": item.price_at.isoformat() if item.price_at else None}
+            groups[item.balance.source].append(row)
+        return jsonify(groups=groups, total_usd=str(summary.total_usd), unpriced_count=summary.unpriced_count, discovery=discovery, errors=errors, excluded="NFT、流动性池份额、借贷债务和跨链桥在途资产未计入总额")
 
     return app

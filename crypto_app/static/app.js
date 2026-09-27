@@ -31,6 +31,60 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
   document.querySelectorAll('.navlink').forEach((button) => button.classList.toggle('active', button.dataset.page === name));
   if (name === 'records') loadRecords();
+  if (name === 'assets') loadAssets();
+}
+
+let assetRequest = 0;
+function assetCell(row, values) {
+  values.forEach((value) => { const cell = document.createElement('td'); cell.textContent = value == null ? '—' : String(value); row.append(cell); });
+}
+function renderAssetRows(target, items, onchain) {
+  $(target).replaceChildren(...items.map((item) => {
+    const row = document.createElement('tr');
+    const source = item.price_source ? `${item.price_source} · ${new Date(item.price_at).toLocaleString()}` : '未计价';
+    const values = onchain ? [`${item.chain_id === 1 ? 'Ethereum' : 'BNB Smart Chain'} / ${item.symbol}`, item.contract || '原生币', item.quantity, item.value_usd ?? '未计价', source, new Date(item.observed_at).toLocaleString()] : [item.symbol, item.quantity, item.value_usd ?? '未计价', source, new Date(item.observed_at).toLocaleString()];
+    assetCell(row, values); return row;
+  }));
+  if (!items.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = onchain ? 6 : 5; cell.textContent = '暂无资产数据'; row.append(cell); $(target).append(row); }
+}
+function clearAssets() {
+  $('binance-assets').replaceChildren(); $('onchain-assets').replaceChildren();
+  $('asset-total').textContent = '—'; $('asset-unpriced').textContent = '—';
+  $('asset-notices').replaceChildren(); $('asset-status').textContent = '加载中';
+}
+async function loadAssets() {
+  const requestId = ++assetRequest;
+  clearAssets();
+  try {
+    const address = $('wallet-address').value.trim();
+    const data = await api(`/api/assets${address ? `?address=${encodeURIComponent(address)}` : ''}`);
+    if (requestId !== assetRequest) return;
+    $('asset-total').textContent = data.total_usd;
+    $('asset-unpriced').textContent = String(data.unpriced_count);
+    $('asset-status').textContent = '已更新';
+    $('asset-updated').textContent = new Date().toLocaleString();
+    renderAssetRows('binance-assets', data.groups['binance-spot'], false);
+    renderAssetRows('onchain-assets', data.groups.onchain, true);
+    const notices = Object.values(data.errors);
+    Object.entries(data.discovery).forEach(([chain, status]) => { if (!status.complete) notices.push(`${chain === '1' ? 'Ethereum' : 'BNB Smart Chain'} 资产发现不完整：${status.error || '索引器暂不可用'}；已知余额仍显示。最近查询 ${status.observed_at ? new Date(status.observed_at).toLocaleString() : '未知'}`); });
+    $('asset-notices').replaceChildren(...notices.map((message) => { const element = document.createElement('p'); element.className = 'asset-notice'; element.textContent = message; return element; }));
+  } catch (error) { if (requestId === assetRequest) { $('asset-status').textContent = '查询失败'; toast(error.message); } }
+}
+
+async function connectWallet() {
+  try {
+    if (!window.cryptoWallet) throw new Error('MetaMask Connect 尚未加载');
+    $('wallet-address').value = await window.cryptoWallet.selectAddress();
+    await loadAssets();
+  } catch (error) { toast(error.message); }
+}
+
+async function connectReadKey() {
+  try {
+    await api('/api/binance/read-credentials', { method: 'POST', body: JSON.stringify({ key: $('read-key').value.trim(), secret: $('read-secret').value }) });
+    $('read-key').value = ''; $('read-secret').value = '';
+    toast('币安只读账户已连接。');
+  } catch (error) { toast(error.message); }
 }
 
 function renderChart(candles, fills = []) {
@@ -120,6 +174,10 @@ document.querySelectorAll('.navlink').forEach((button) => button.addEventListene
 $('load-market').addEventListener('click', loadMarket);
 $('run-backtest').addEventListener('click', runBacktest);
 $('save-research').addEventListener('click', saveResearch);
+$('wallet-address').addEventListener('input', () => { ++assetRequest; clearAssets(); $('asset-status').textContent = '地址已变化，请刷新'; });
+$('connect-wallet').addEventListener('click', connectWallet);
+$('refresh-assets').addEventListener('click', loadAssets);
+$('connect-read-key').addEventListener('click', connectReadKey);
 $('strategy-kind').addEventListener('change', strategyParams);
 $('symbol').addEventListener('input', async () => {
   const query = $('symbol').value.trim();

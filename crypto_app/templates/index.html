@@ -6,6 +6,7 @@
   <title>现货研究工作台</title>
   <link rel="stylesheet" href="/static/style.css">
   <script defer src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+  <script defer src="/static/wallet.js"></script>
   <script defer src="/static/app.js"></script>
 </head>
 <body>
@@ -54,9 +55,17 @@
           <div class="panel"><div class="paneltitle"><h2>模拟结果</h2><span class="pill subtle">仅供学习</span></div><div class="panelbody"><div id="backtest-summary" class="resultgrid">选择策略并运行回测后查看结果。</div><div class="tablewrap"><table><thead><tr><th>信号时间</th><th>模拟成交时间</th><th>方向</th><th>数量</th><th>价格</th><th>费用</th><th>剩余现金</th><th>持币</th></tr></thead><tbody id="fills-body"></tbody></table></div></div></div>
         </section>
         <section class="page" id="page-records"><div class="pagehead"><div><div class="eyebrow">HISTORY</div><h1>回测记录</h1><p class="subtitle">按数据版本、策略版本和费用假设追溯结果。</p></div></div><div class="panel"><div class="panelbody" id="records-list">运行回测后会显示记录。</div></div></section>
-        <section class="page" id="page-assets"><div class="pagehead"><div><div class="eyebrow">PORTFOLIO</div><h1>资产</h1></div></div><div class="panel"><div class="panelbody" id="assets-root">币安现货与链上资产接入中。</div></div></section>
+        <section class="page" id="page-assets">
+          <div class="pagehead"><div><div class="eyebrow">PORTFOLIO</div><h1>资产总览</h1><p class="subtitle">分别核对币安现货和钱包资产；缺价项目保留余额。</p></div><span class="pill">只读查询</span></div>
+          <div class="panel"><div class="paneltitle"><h2>钱包地址</h2><span class="pill subtle">Ethereum · BNB Smart Chain</span></div><div class="panelbody"><div class="asset-controls"><label>公开地址 <input id="wallet-address" placeholder="0x…" autocomplete="off" spellcheck="false"></label><button id="connect-wallet">连接 MetaMask</button><button id="refresh-assets" class="primary">刷新资产</button></div><p class="hint">MetaMask Connect 仅用于选取公开地址，无需签名或提供助记词。也可直接粘贴地址。</p></div></div>
+          <div class="statgrid"><div class="stat"><small>已计价资产合计 (USD)</small><strong id="asset-total">—</strong><span>只统计有新鲜价格的资产</span></div><div class="stat"><small>未计价项目</small><strong id="asset-unpriced">—</strong><span>仍展示数量，不按零估值</span></div><div class="stat"><small>查询状态</small><strong id="asset-status">等待刷新</strong><span id="asset-updated">按来源查看时间</span></div></div>
+          <div id="asset-notices" class="notice-stack" role="status"></div>
+          <div class="panel"><div class="paneltitle"><h2>币安现货</h2><span class="pill subtle">API 只读密钥</span></div><div class="panelbody tablewrap"><table><thead><tr><th>币种</th><th>数量</th><th>估值 USD</th><th>价格来源</th><th>余额时间</th></tr></thead><tbody id="binance-assets"></tbody></table></div></div>
+          <div class="panel"><div class="paneltitle"><h2>链上钱包</h2><span class="pill subtle">公开地址</span></div><div class="panelbody tablewrap"><table><thead><tr><th>网络 / 币种</th><th>合约</th><th>数量</th><th>估值 USD</th><th>价格来源</th><th>余额时间</th></tr></thead><tbody id="onchain-assets"></tbody></table></div></div>
+          <p class="hint">范围说明：NFT、流动性池份额、借贷债务和跨链桥在途资产未计入总额。第三方索引器可能遗漏代币，请以钱包和交易所记录核对。MetaMask Connect © ConsenSys Software Inc.，按<a href="/static/vendor/METAMASK-CONNECT-LICENSE" target="_blank" rel="noopener noreferrer">非商业许可</a>提供。</p>
+        </section>
         <section class="page" id="page-trade"><div class="pagehead"><div><div class="eyebrow">SPOT TRADING</div><h1>真实币安现货交易</h1></div></div><div class="panel"><div class="panelbody" id="trade-root">真实手动下单默认关闭；完成交易设置后方可使用。</div></div></section>
-        <section class="page" id="page-settings"><div class="pagehead"><div><div class="eyebrow">SETTINGS</div><h1>连接与风控</h1></div></div><div class="panel"><div class="panelbody" id="settings-root">连接设置接入中。</div></div></section>
+        <section class="page" id="page-settings"><div class="pagehead"><div><div class="eyebrow">SETTINGS</div><h1>连接与风控</h1></div></div><div class="panel"><div class="paneltitle"><h2>币安只读 API</h2></div><div class="panelbody formgrid"><label class="wide">API Key <input id="read-key" autocomplete="off"></label><label class="wide">API Secret <input id="read-secret" type="password" autocomplete="new-password"></label><button id="connect-read-key" class="primary">连接只读账户</button><p class="hint wide">请创建仅有读取权限的密钥，关闭交易及提现权限；先在本机服务环境设置 CRYPTO_MASTER_KEY。</p></div></div><div class="panel"><div class="panelbody" id="settings-root">真实交易设置接入中。</div></div></section>
       </div>
     </main>
   </div>
