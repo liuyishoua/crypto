@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>现货研究工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brandmark">◈</span><span>现货研究</span></div>
+      <div class="navcaption">WORKSPACE</div>
+      <nav aria-label="主导航">
+        <button class="navlink active" data-page="market">▧ <span>市场</span></button>
+        <button class="navlink" data-page="strategy">◫ <span>策略实验室</span></button>
+        <button class="navlink" data-page="records">◷ <span>回测记录</span></button>
+        <button class="navlink" data-page="assets">◈ <span>资产</span></button>
+        <button class="navlink" data-page="trade">⇄ <span>交易</span></button>
+        <button class="navlink" data-page="settings">⚙ <span>设置</span></button>
+      </nav>
+      <div class="sidefoot">个人研究工作台<br><b>数据与信号需独立核实</b></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><span>研究 / 现货市场</span><span class="mode">● 研究模式 · 模拟结果</span></header>
+      <div class="content">
+        <section class="page active" id="page-market">
+          <div class="pagehead"><div><div class="eyebrow">MARKET RESEARCH</div><h1>看清数据，再看信号。</h1><p class="subtitle">搜索任意可用币安现货交易对，检查历史覆盖后开展研究。</p></div><span class="pill">公开行情 · 无需密钥</span></div>
+          <div class="panel"><div class="panelbody filters">
+            <label>交易对 <input id="symbol" value="BTCUSDT" autocomplete="off" placeholder="输入 BTC、SOL 或交易对"><span id="symbol-hint" class="hint"></span></label>
+            <label>周期 <select id="interval"><option value="1d">日线 1D</option><option value="4h">4 小时</option><option value="1h">1 小时</option></select></label>
+            <label>开始 <input id="start" type="date" value="2024-01-01"></label>
+            <label>结束 <input id="end" type="date" value="2024-05-01"></label>
+            <button id="load-market" class="primary">加载行情</button>
+          </div></div>
+          <div class="statgrid"><div class="stat"><small>交易对</small><strong id="stat-symbol">—</strong><span>币安现货</span></div><div class="stat"><small>数据覆盖</small><strong id="stat-count">—</strong><span>连续 K 线</span></div><div class="stat"><small>数据来源</small><strong id="stat-source">—</strong><span id="stat-time">等待加载</span></div></div>
+          <div class="panel"><div class="paneltitle"><div><h2>行情与信号</h2><p class="hint">鼠标悬停查看价格；回测后在图上标出模拟成交。</p></div><span class="pill subtle">模拟 · 历史数据</span></div><div class="panelbody"><div id="chart" role="img" aria-label="现货 K 线图"></div><div class="chart-credit">Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView</a></div></div></div>
+          <div class="panel"><div class="paneltitle"><h2>研究须知</h2></div><div class="panelbody"><p class="hint">K 线只记录一段时间的开高低收，无法证明真实订单簿中的成交价与滑点。回测是规则在历史数据上的模拟，不能说明未来涨跌原因或保证收益。</p></div></div>
+        </section>
+        <section class="page" id="page-strategy">
+          <div class="pagehead"><div><div class="eyebrow">STRATEGY LAB</div><h1>把观点写成规则。</h1><p class="subtitle">先记录来源，再用同一段历史数据检验规则。</p></div><span class="pill">模拟交易</span></div>
+          <div class="panel"><div class="paneltitle"><h2>策略参数</h2></div><div class="panelbody formgrid">
+            <label>策略 <select id="strategy-kind"><option value="sma_cross">均线交叉</option><option value="breakout">区间突破</option><option value="dca">定投</option><option value="buy_hold">买入持有</option></select></label>
+            <label>初始模拟资金 (USDT) <input id="initial-cash" type="number" min="1" value="1000"></label>
+            <label>手续费率 <input id="fee-rate" type="number" min="0" max="0.99" step="0.0001" value="0.001"></label>
+            <label>滑点率 <input id="slippage-rate" type="number" min="0" max="0.99" step="0.0001" value="0.001"></label>
+            <div id="strategy-params" class="paramrow"></div>
+            <p id="strategy-description" class="hint wide"></p>
+            <button id="run-backtest" class="primary">运行回测</button>
+          </div></div>
+          <div class="panel"><div class="paneltitle"><h2>公开策略研究笔记</h2></div><div class="panelbody formgrid"><label class="wide">来源链接 <input id="source-url" type="url" placeholder="https://..."></label><label class="wide">自己的解读 <textarea id="research-note" rows="3" placeholder="这条规则依赖什么假设？在哪些行情可能失效？"></textarea></label><button id="save-research">保存笔记</button></div></div>
+          <div class="panel"><div class="paneltitle"><h2>模拟结果</h2><span class="pill subtle">仅供学习</span></div><div class="panelbody"><div id="backtest-summary" class="resultgrid">选择策略并运行回测后查看结果。</div><div class="tablewrap"><table><thead><tr><th>信号时间</th><th>模拟成交时间</th><th>方向</th><th>数量</th><th>价格</th><th>费用</th><th>剩余现金</th><th>持币</th></tr></thead><tbody id="fills-body"></tbody></table></div></div></div>
+        </section>
+        <section class="page" id="page-records"><div class="pagehead"><div><div class="eyebrow">HISTORY</div><h1>回测记录</h1><p class="subtitle">按数据版本、策略版本和费用假设追溯结果。</p></div></div><div class="panel"><div class="panelbody" id="records-list">运行回测后会显示记录。</div></div></section>
+        <section class="page" id="page-assets"><div class="pagehead"><div><div class="eyebrow">PORTFOLIO</div><h1>资产</h1></div></div><div class="panel"><div class="panelbody" id="assets-root">币安现货与链上资产接入中。</div></div></section>
+        <section class="page" id="page-trade"><div class="pagehead"><div><div class="eyebrow">SPOT TRADING</div><h1>真实币安现货交易</h1></div></div><div class="panel"><div class="panelbody" id="trade-root">真实手动下单默认关闭；完成交易设置后方可使用。</div></div></section>
+        <section class="page" id="page-settings"><div class="pagehead"><div><div class="eyebrow">SETTINGS</div><h1>连接与风控</h1></div></div><div class="panel"><div class="panelbody" id="settings-root">连接设置接入中。</div></div></section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
