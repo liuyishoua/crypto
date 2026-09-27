@@ -7,7 +7,7 @@ from zipfile import ZipFile
 
 import requests
 
-from .market import Candle, MarketData, checksum_candles, validate_candles
+from .market import INTERVALS, Candle, MarketData, checksum_candles, validate_candles
 
 
 class MarketUnavailable(Exception):
@@ -75,6 +75,12 @@ class BinancePublicClient:
         sources = set()
         cursor = start
         now = datetime.now(timezone.utc)
+        if start >= now - timedelta(days=120) and (end - start) / INTERVALS[interval] <= 1000:
+            bars = self._rest_candles(symbol, interval, start, end)
+            candles = tuple(bars)
+            result = MarketData("binance", "spot", symbol, interval, candles, "binance-rest", now, checksum_candles(candles))
+            validate_candles(result, min_bars=1)
+            return result
         while cursor < end:
             next_month = datetime(cursor.year + (cursor.month == 12), cursor.month % 12 + 1, 1, tzinfo=timezone.utc)
             segment_end = min(next_month, end)
@@ -115,6 +121,8 @@ class BinancePublicClient:
             if next_cursor <= cursor:
                 raise ValueError("币安 K 线分页未前进")
             cursor = next_cursor
+            if len(batch) < 1000:
+                break
         return bars
 
     def archive_day(self, symbol: str, interval: str, day) -> MarketData:

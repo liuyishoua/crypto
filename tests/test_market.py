@@ -182,3 +182,22 @@ def test_full_historical_month_uses_archive():
     data = ArchiveClient(session=NoRest()).candles("SOLUSDT", "1h", datetime(2024, 2, 1, tzinfo=UTC), datetime(2024, 3, 1, tzinfo=UTC))
     assert data.source == "binance-public-data"
     assert len(data.candles) == 29 * 24
+
+
+def test_recent_range_uses_one_rest_request_instead_of_monthly_archives():
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=30)
+    end = start + timedelta(days=30)
+
+    class RecentSession:
+        def __init__(self): self.calls = []
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if "/api/v3/klines" not in url: raise AssertionError("recent chart must use REST")
+            rows = [[int((start + timedelta(days=i)).timestamp() * 1000), "10", "12", "9", "11", "100"] for i in range(30)]
+            return Response(rows)
+
+    session = RecentSession()
+    data = BinancePublicClient(session=session).candles("BTCUSDT", "1d", start, end)
+    assert len(session.calls) == 1
+    assert data.source == "binance-rest"
+    assert len(data.candles) == 30

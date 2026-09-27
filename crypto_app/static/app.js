@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { chart: null, series: null, candles: [], insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [] };
+const state = { chart: null, series: null, candles: [], insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
 
 function csrf() {
   const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
@@ -28,6 +28,7 @@ function query() {
 }
 
 function showPage(name) {
+  if (name !== 'market') stopOrderBook('已暂停 · 返回市场页后恢复');
   document.querySelectorAll('.page').forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
   document.querySelectorAll('.navlink').forEach((button) => button.classList.toggle('active', button.dataset.page === name));
   const titles = { market: '研究 / 现货市场', strategy: '研究 / 策略实验室', records: '研究 / 回测记录', assets: '账户 / 资产总览', trade: '交易 / 真实币安现货', settings: '账户 / 连接与风控' };
@@ -35,7 +36,11 @@ function showPage(name) {
   $('topbar-mode').textContent = name === 'trade' ? '● 真实交易 · 逐笔确认' : name === 'assets' || name === 'settings' ? '● 本机账户 · 只读默认' : '● 研究模式 · 模拟结果';
   $('topbar-mode').classList.toggle('live-mode', name === 'trade');
   if (name === 'records') loadRecords();
-  if (name === 'market' && state.chart) state.chart.applyOptions({ width: $('chart').clientWidth, height: $('chart').clientHeight });
+  if (name === 'strategy' && !state.strategySourcesLoaded) loadStrategySources();
+  if (name === 'market') {
+    if (state.chart) state.chart.applyOptions({ width: $('chart').clientWidth, height: $('chart').clientHeight });
+    if (state.marketSymbol) startOrderBook(state.marketSymbol);
+  }
   if (name === 'assets') loadAssets();
   if (name === 'trade') { loadTradeSettings(); loadTradeOrders(); }
 }
@@ -219,14 +224,131 @@ function renderChart(candles, fills = [], preserveRange = false) {
   state.fills = fills;
 }
 
+function clearOrderBook(status) {
+  $('order-book-status').textContent = status;
+  $('book-best').textContent = '—';
+  $('book-spread').textContent = '—';
+  $('book-balance').textContent = '—';
+  $('book-received').textContent = '—';
+  $('book-bids').textContent = '等待数据';
+  $('book-asks').textContent = '等待数据';
+}
+
+function stopOrderBook(status = '已暂停') {
+  ++state.orderBookGeneration;
+  clearTimeout(state.orderBookReconnect);
+  clearTimeout(state.orderBookStaleTimer);
+  state.orderBookReconnect = null;
+  state.orderBookStaleTimer = null;
+  const socket = state.orderBookSocket;
+  state.orderBookSocket = null;
+  state.orderBookSymbol = null;
+  state.orderBookAttempts = 0;
+  if (socket) socket.close();
+  clearOrderBook(status);
+}
+
+function orderBookActive() {
+  return !document.hidden && $('page-market').classList.contains('active');
+}
+
+function bookPrice(value) {
+  const [whole, decimals = ''] = String(value).split('.');
+  return `${Number(whole).toLocaleString()}${decimals.replace(/0+$/, '') ? `.${decimals.replace(/0+$/, '')}` : ''}`;
+}
+
+function bookAmount(value) {
+  const number = Number(value);
+  return number >= 1e6 ? `${(number / 1e6).toFixed(2)}M` : number >= 1e3 ? `${(number / 1e3).toFixed(2)}K` : number.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function renderBookLevels(target, levels, side) {
+  const maxNotional = Math.max(1, ...levels.map(([price, quantity]) => Number(price) * Number(quantity)));
+  let cumulative = 0;
+  const rows = levels.map(([price, quantity]) => {
+    const notional = Number(price) * Number(quantity);
+    cumulative += notional;
+    const row = document.createElement('div');
+    row.className = `book-level ${side}`;
+    const width = Math.max(1, Math.min(100, notional / maxNotional * 100));
+    row.style.background = `linear-gradient(to left, ${side === 'bid' ? '#e7f5ef' : '#fff0ef'} ${width}%, transparent ${width}%)`;
+    for (const value of [bookPrice(price), bookAmount(quantity), bookAmount(cumulative)]) {
+      const cell = document.createElement('span'); cell.textContent = value; row.append(cell);
+    }
+    return row;
+  });
+  $(target).replaceChildren(...rows);
+}
+
+function renderOrderBook(snapshot) {
+  const bids = snapshot.bids.slice(0, 20), asks = snapshot.asks.slice(0, 20);
+  if (!bids.length || !asks.length) { clearOrderBook('盘口暂无挂单'); return; }
+  const bidPrice = Number(bids[0][0]), askPrice = Number(asks[0][0]);
+  if (!(bidPrice > 0 && askPrice >= bidPrice)) { clearOrderBook('盘口数据异常'); return; }
+  const bidTotal = bids.reduce((sum, [price, quantity]) => sum + Number(price) * Number(quantity), 0);
+  const askTotal = asks.reduce((sum, [price, quantity]) => sum + Number(price) * Number(quantity), 0);
+  $('book-best').textContent = `${bookPrice(bids[0][0])} / ${bookPrice(asks[0][0])}`;
+  $('book-spread').textContent = `${bookPrice((askPrice - bidPrice).toFixed(8))} · ${((askPrice - bidPrice) / askPrice * 100).toFixed(4)}%`;
+  $('book-balance').textContent = bidTotal + askTotal > 0 ? `${(bidTotal / (bidTotal + askTotal) * 100).toFixed(1)}%` : '—';
+  $('book-received').textContent = new Date().toLocaleTimeString();
+  $('order-book-status').textContent = '● 实时连接中';
+  renderBookLevels('book-bids', bids, 'bid');
+  renderBookLevels('book-asks', asks, 'ask');
+}
+
+function connectOrderBook(symbol, generation) {
+  if (generation !== state.orderBookGeneration || !orderBookActive()) return;
+  let socket;
+  try { socket = new WebSocket(`wss://data-stream.binance.vision/ws/${symbol.toLowerCase()}@depth20`); }
+  catch { clearOrderBook('无法建立盘口连接'); return; }
+  state.orderBookSocket = socket;
+  clearOrderBook('正在连接实时盘口…');
+  socket.onopen = () => { if (generation === state.orderBookGeneration) $('order-book-status').textContent = '已连接 · 等待盘口'; };
+  socket.onmessage = (event) => {
+    if (generation !== state.orderBookGeneration || !orderBookActive()) return;
+    try {
+      const snapshot = JSON.parse(event.data);
+      if (!Array.isArray(snapshot.bids) || !Array.isArray(snapshot.asks) || !Number.isSafeInteger(snapshot.lastUpdateId)) return;
+      state.orderBookAttempts = 0;
+      renderOrderBook(snapshot);
+      clearTimeout(state.orderBookStaleTimer);
+      state.orderBookStaleTimer = setTimeout(() => clearOrderBook('超过 10 秒无更新 · 等待盘口'), 10000);
+    } catch { $('order-book-status').textContent = '盘口消息无效'; }
+  };
+  socket.onerror = () => { if (generation === state.orderBookGeneration) { $('order-book-status').textContent = '连接出错 · 等待重连'; socket.close(); } };
+  socket.onclose = () => {
+    if (generation !== state.orderBookGeneration) return;
+    state.orderBookSocket = null;
+    clearTimeout(state.orderBookStaleTimer);
+    if (!orderBookActive()) { stopOrderBook('已暂停 · 返回市场页后恢复'); return; }
+    clearOrderBook('连接中断 · 正在重连');
+    const delay = Math.min(15000, 1000 * 2 ** Math.min(4, state.orderBookAttempts++));
+    state.orderBookReconnect = setTimeout(() => connectOrderBook(symbol, generation), delay);
+  };
+}
+
+function startOrderBook(symbol) {
+  if (!orderBookActive()) return;
+  if (!window.WebSocket) { clearOrderBook('浏览器不支持实时连接'); return; }
+  if (state.orderBookSymbol === symbol && (state.orderBookSocket || state.orderBookReconnect)) return;
+  stopOrderBook('正在切换交易对…');
+  state.orderBookSymbol = symbol;
+  connectOrderBook(symbol, state.orderBookGeneration);
+}
+
 async function loadMarket() {
   const requestId = ++state.marketRequestId;
   try {
     if (!$('start').value || !$('end').value || $('start').value >= $('end').value) throw new Error('请选择有效的开始和结束日期。');
+    const requestedSymbol = $('symbol').value.trim().toUpperCase();
+    if (/^[A-Z0-9]{4,24}$/.test(requestedSymbol)) { state.marketSymbol = requestedSymbol; startOrderBook(requestedSymbol); }
     $('load-market').disabled = true;
+    $('market-workspace').setAttribute('aria-busy', 'true');
+    $('market-load-state').textContent = '正在加载…';
     const data = await api(`/api/candles?${query()}`);
     if (requestId !== state.marketRequestId) return;
     state.candles = data.candles;
+    state.marketSymbol = data.symbol;
     state.insights = data.insights || [];
     state.rangeDays = [...new Set(data.candles.map((bar) => utcDate(bar.time * 1000)))];
     updateSelectedPair(data.symbol);
@@ -237,11 +359,13 @@ async function loadMarket() {
     renderChart(data.candles);
     setupRangeNavigator();
     renderMarketList();
+    startOrderBook(data.symbol);
+    $('market-load-state').textContent = '已更新';
     toast(data.source.startsWith('cache:') ? '当前使用离线缓存；请核对获取时间和数据覆盖。' : '行情已加载；请检查数据覆盖后再回测。');
   } catch (error) {
-    if (requestId === state.marketRequestId) toast(error.message.includes('历史数据未覆盖') ? '该币在所选日期内历史不足；请选择近 30 天、近 7 天或自定义更短区间。' : error.message);
+    if (requestId === state.marketRequestId) { $('market-load-state').textContent = '加载失败'; toast(error.message.includes('历史数据未覆盖') ? '该币在所选日期内历史不足；请选择近 30 天、近 7 天或自定义更短区间。' : error.message); }
   }
-  finally { if (requestId === state.marketRequestId) $('load-market').disabled = false; }
+  finally { if (requestId === state.marketRequestId) { $('load-market').disabled = false; $('market-workspace').removeAttribute('aria-busy'); } }
 }
 
 function setupRangeNavigator() {
@@ -438,6 +562,66 @@ async function saveResearch() {
   } catch (error) { toast(error.message); }
 }
 
+function chooseStrategySource(item) {
+  state.selectedStrategySource = item;
+  $('selected-source-name').textContent = item.name;
+  $('selected-source-url').href = item.url;
+  $('selected-source-url').hidden = false;
+  $('selected-source-revision').textContent = `版本 ${item.revision.slice(0, 12)} · ${item.license}`;
+  renderStrategySources();
+}
+
+function renderStrategySources() {
+  const term = $('strategy-source-search').value.trim().toLowerCase();
+  const items = state.strategySources.filter((item) => item.name.toLowerCase().includes(term));
+  $('strategy-source-list').replaceChildren(...items.map((item) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = `source-item${state.selectedStrategySource?.path === item.path ? ' active' : ''}`;
+    const name = document.createElement('strong'); name.textContent = item.name;
+    const detail = document.createElement('span'); detail.textContent = `${item.engine} · ${item.license}`;
+    button.append(name, detail); button.addEventListener('click', () => chooseStrategySource(item)); return button;
+  }));
+  if (!items.length) $('strategy-source-list').textContent = '没有匹配的策略文件。';
+}
+
+async function loadStrategySources() {
+  $('strategy-source-status').textContent = '正在加载目录…';
+  try {
+    const data = await api('/api/strategy-sources');
+    state.strategySources = data.items;
+    state.strategySourcesLoaded = true;
+    $('strategy-source-status').textContent = data.stale ? `离线目录 · ${data.items.length} 个文件` : `${data.items.length} 个策略文件`;
+    $('daily-strategy').textContent = data.daily.name;
+    $('daily-strategy').onclick = () => chooseStrategySource(data.daily);
+    renderStrategySources();
+    loadSavedSourceNotes();
+  } catch (error) { $('strategy-source-status').textContent = '目录不可用'; $('strategy-source-list').textContent = error.message; }
+}
+
+async function loadSavedSourceNotes() {
+  try {
+    const data = await api('/api/strategy-notes');
+    $('saved-source-notes').replaceChildren(...data.items.slice(0, 5).map((item) => {
+      const row = document.createElement('p');
+      const name = document.createElement('strong'); name.textContent = `${item.path.split('/').at(-1)} · ${item.revision.slice(0, 10)}`;
+      const note = document.createElement('span'); note.textContent = ` ${item.note}`;
+      row.append(name, note); return row;
+    }));
+    if (!data.items.length) $('saved-source-notes').textContent = '还没有保存的开源策略学习笔记。';
+  } catch (error) { $('saved-source-notes').textContent = error.message; }
+}
+
+async function saveExternalStrategyNote() {
+  if (!state.selectedStrategySource) { toast('请先从目录选择策略文件。'); return; }
+  try {
+    const item = state.selectedStrategySource;
+    await api('/api/strategy-notes', { method: 'POST', body: JSON.stringify({ path: item.path, revision: item.revision, note: $('external-strategy-note').value }) });
+    $('external-strategy-note').value = '';
+    toast('来源版本与学习笔记已保存。');
+    loadSavedSourceNotes();
+  } catch (error) { toast(error.message); }
+}
+
 async function loadRecords() {
   try {
     const data = await api('/api/backtests');
@@ -450,6 +634,8 @@ document.querySelectorAll('.navlink').forEach((button) => button.addEventListene
 $('load-market').addEventListener('click', loadMarket);
 $('run-backtest').addEventListener('click', runBacktest);
 $('save-research').addEventListener('click', saveResearch);
+$('strategy-source-search').addEventListener('input', renderStrategySources);
+$('save-external-note').addEventListener('click', saveExternalStrategyNote);
 $('wallet-address').addEventListener('input', () => { ++assetRequest; clearAssets(); $('asset-status').textContent = '地址已变化，请刷新'; });
 $('connect-wallet').addEventListener('click', connectWallet);
 $('refresh-assets').addEventListener('click', loadAssets);
@@ -472,6 +658,10 @@ document.querySelectorAll('[data-chart-style]').forEach((button) => button.addEv
 document.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => setPreset(Number(button.dataset.days))));
 $('range-start').addEventListener('input', () => applyRangeFromSlider('start'));
 $('range-end').addEventListener('input', () => applyRangeFromSlider('end'));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopOrderBook('已暂停 · 返回页面后恢复');
+  else if (state.marketSymbol && orderBookActive()) startOrderBook(state.marketSymbol);
+});
 $('chart-fit').addEventListener('click', () => { if (state.chart) { state.chart.timeScale().fitContent(); $('range-start').value = '0'; $('range-end').value = String(state.rangeDays.length); syncRangeLabels(); } });
 for (const [id, factor] of [['chart-zoom-in', 0.75], ['chart-zoom-out', 1.35]]) $(id).addEventListener('click', () => { const scale = state.chart?.timeScale(); const range = scale?.getVisibleLogicalRange(); if (!range) return; const center = (range.from + range.to) / 2; const half = (range.to - range.from) * factor / 2; scale.setVisibleLogicalRange({ from: center - half, to: center + half }); });
 initializeMarketExplorer();

@@ -98,4 +98,10 @@ def test_home_has_chart_and_simulation_status(tmp_path):
     assert 'id="range-start"' in page
     assert 'id="range-end"' in page
     assert 'id="insight-volume"' in page
+    assert 'id="order-book"' in page
+    assert 'id="order-book-status"' in page
+    assert 'id="strategy-source-list"' in page
+    assert "binance_paper_trade" in page
+    assert "hbot start" in page
+    assert "wss://data-stream.binance.vision" in browser.get("/").headers["Content-Security-Policy"]
     assert browser.get("/static/vendor/lightweight-charts.standalone.production.js").status_code == 200

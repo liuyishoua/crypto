@@ -21,6 +21,7 @@ from .research import save_research
 from .secrets import SecretStore
 from .store import open_store
 from .strategy import StrategySpec
+from .strategy_sources import SourceUnavailable, StrategySourceCatalog
 from .trade_execution import TradeService
 from .trade_gateway import BinanceTradeGateway
 from .trade_preview import ManualOrderIntent
@@ -28,12 +29,13 @@ from .trade_settings import TradeSettingsStore
 from .valuation import CoinGeckoPriceClient, quote_usd, summarize_assets
 
 
-def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None, trade_gateway=None) -> Flask:
+def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None, trade_gateway=None, strategy_catalog=None) -> Flask:
     app = Flask(__name__)
     app.extensions["draining"] = threading.Event()
     app.config.update(BIND_HOST="127.0.0.1", TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
     app.extensions["store"] = open_store(Path(runtime_dir))
     app.extensions["market_client"] = market_client or BinancePublicClient()
+    app.extensions["strategy_catalog"] = strategy_catalog or StrategySourceCatalog()
     master_key = os.environ.get("CRYPTO_MASTER_KEY", "").encode()
     secret_store = SecretStore(Path(runtime_dir), master_key) if master_key else None
     app.extensions["account_source"] = account_source if account_source is not None else (BinanceAccountSource(secret_store) if secret_store else None)
@@ -70,7 +72,7 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
             response.set_cookie("csrf_token", secrets.token_urlsafe(32), httponly=False, samesite="Strict")
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://mm-sdk-relay.api.cx.metamask.io https://ethereum-rpc.publicnode.com https://bsc-rpc.publicnode.com; frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://mm-sdk-relay.api.cx.metamask.io wss://data-stream.binance.vision https://ethereum-rpc.publicnode.com https://bsc-rpc.publicnode.com; frame-ancestors 'none'"
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -86,6 +88,10 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
     @app.errorhandler(MarketUnavailable)
     def unavailable(error):
         return jsonify(error=str(error), cached_at=error.cached_at.isoformat() if error.cached_at else None), 503
+
+    @app.errorhandler(SourceUnavailable)
+    def source_unavailable(error):
+        return jsonify(error=str(error)), 503
 
     @app.errorhandler(LookupError)
     def missing(error):
@@ -141,6 +147,31 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
         spec = StrategySpec(str(body.get("kind", "")), body.get("parameters", {}), str(body.get("version", "1")), str(body.get("source_url", "")), str(body.get("note", "")))
         record_id = save_research(app.extensions["store"], spec)
         return jsonify(id=record_id), 201
+
+    @app.get("/api/strategy-sources")
+    def strategy_sources():
+        return jsonify(app.extensions["strategy_catalog"].sources())
+
+    @app.get("/api/strategy-notes")
+    def strategy_notes():
+        store = app.extensions["store"]
+        store.execute("CREATE TABLE IF NOT EXISTS strategy_notes (id INTEGER PRIMARY KEY, path TEXT NOT NULL, revision TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)")
+        rows = store.execute("SELECT id, path, revision, note, created_at FROM strategy_notes ORDER BY id DESC LIMIT 50").fetchall()
+        return jsonify(items=[{"id": row[0], "path": row[1], "revision": row[2], "note": row[3], "created_at": row[4]} for row in rows])
+
+    @app.post("/api/strategy-notes")
+    def save_strategy_note():
+        body = request.get_json(silent=True) or {}
+        path, revision, note = str(body.get("path", "")), str(body.get("revision", "")), str(body.get("note", "")).strip()
+        if not note or len(note) > 4000:
+            raise ValueError("学习笔记必须为 1～4000 字")
+        if not re.fullmatch(r"user_data/strategies/[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*\.py", path) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("策略来源或版本无效")
+        store = app.extensions["store"]
+        store.execute("CREATE TABLE IF NOT EXISTS strategy_notes (id INTEGER PRIMARY KEY, path TEXT NOT NULL, revision TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)")
+        cursor = store.execute("INSERT INTO strategy_notes(path, revision, note, created_at) VALUES (?,?,?,?)", (path, revision, note, datetime.now(timezone.utc).isoformat()))
+        store.commit()
+        return jsonify(id=cursor.lastrowid), 201
 
     def result_payload(result):
         payload = result._asdict()
