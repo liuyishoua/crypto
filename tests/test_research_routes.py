@@ -103,5 +103,48 @@ def test_home_has_chart_and_simulation_status(tmp_path):
     assert 'id="strategy-source-list"' in page
     assert "binance_paper_trade" in page
     assert "hbot start" in page
+    assert 'src="/static/market_analytics.js"' in page
+    assert 'id="book-balance-5"' in page
+    assert 'id="book-balance-change"' in page
+    assert 'id="book-trend"' in page
+    assert 'id="book-trend-range"' in page
+    assert 'id="tape-buy-share"' in page
+    assert 'id="recent-trades"' in page
+    assert 'id="chart-live-status"' in page
     assert "wss://data-stream.binance.vision" in browser.get("/").headers["Content-Security-Policy"]
     assert browser.get("/static/vendor/lightweight-charts.standalone.production.js").status_code == 200
+
+
+def test_current_day_chart_includes_open_hour_but_backtest_excludes_it(tmp_path):
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    start = today - timedelta(days=5)
+    requested_end = today + timedelta(days=1)
+
+    class CurrentMarketClient:
+        def __init__(self): self.ends = []
+        def candles(self, symbol, interval, range_start, range_end):
+            self.ends.append(range_end)
+            actual_end = min(range_end, current_hour + timedelta(hours=1))
+            count = int((actual_end - range_start) / timedelta(hours=1))
+            bars = tuple(Candle(range_start + timedelta(hours=i), Decimal(10), Decimal(11), Decimal(9), Decimal(10), Decimal(100)) for i in range(count))
+            return MarketData("binance", "spot", symbol, interval, bars, "fixture", now, checksum_candles(bars))
+
+    market = CurrentMarketClient()
+    app = create_app(tmp_path, market_client=market)
+    app.testing = True
+    browser = app.test_client()
+    path = f"/api/candles?symbol=BTCUSDT&interval=1h&start={start.date()}&end={requested_end.date()}"
+    chart = browser.get(path)
+    assert chart.status_code == 200
+    assert chart.json["candles"][-1]["time"] == int(current_hour.timestamp())
+    assert chart.json["last_candle_open"] is True
+    assert market.ends[-1] == current_hour + timedelta(hours=1)
+
+    browser.get("/health")
+    csrf = browser.get_cookie("csrf_token").value
+    headers = {"Host": "localhost", "Origin": "http://localhost", "X-App-Request": "1", "X-CSRF-Token": csrf}
+    result = browser.post("/api/backtests", headers=headers, json={"symbol": "BTCUSDT", "interval": "1h", "start": str(start.date()), "end": str(requested_end.date()), "kind": "buy_hold", "parameters": {}, "initial_cash": "1000"})
+    assert result.status_code == 201
+    assert market.ends[-1] == current_hour

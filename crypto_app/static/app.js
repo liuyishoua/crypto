@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { chart: null, series: null, candles: [], insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
+const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookReconnect: null, orderBookStaleTimer: null, orderBookAttempts: 0, bookHistory: [], recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
 
 function csrf() {
   const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
@@ -172,7 +172,7 @@ const addUtcDays = (value, days) => utcDate(Date.parse(`${value}T00:00:00Z`) + d
 function setPreset(days, load = true) {
   const allowed = Math.max(1, Math.floor(2500 * intervalSeconds[$('interval').value] / 86400));
   const actual = Math.min(days, allowed);
-  const end = utcDate(new Date());
+  const end = addUtcDays(utcDate(new Date()), 1);
   $('end').value = end;
   $('start').value = addUtcDays(end, -actual);
   document.querySelectorAll('[data-days]').forEach((button) => button.classList.toggle('active', Number(button.dataset.days) === days));
@@ -198,14 +198,20 @@ function renderChart(candles, fills = [], preserveRange = false) {
   const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', lastValueVisible: false, priceLineVisible: false });
   volume.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
   volume.setData(candles.map(({ time, open, close, volume: amount }) => ({ time, value: Number(amount), color: close >= open ? '#a7dccc' : '#f3b3b3' })));
+  if (state.liveBar && state.liveBar.time >= candles.at(-1).time) {
+    const bar = state.liveBar;
+    series.update(state.chartStyle === 'line' ? { time: bar.time, value: bar.close } : { time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close });
+    volume.update({ time: bar.time, value: Number(bar.volume), color: bar.close >= bar.open ? '#a7dccc' : '#f3b3b3' });
+  }
   const markers = fills.map((fill) => ({ time: Math.floor(Date.parse(fill.filled_at) / 1000), position: fill.side === 'BUY' ? 'belowBar' : 'aboveBar', color: fill.side === 'BUY' ? '#249e81' : '#df6a6a', shape: fill.side === 'BUY' ? 'arrowUp' : 'arrowDown', text: `${fill.side === 'BUY' ? '模拟买入' : '模拟卖出'} ${Number(fill.price).toFixed(3)}` }));
   if (markers.length) LightweightCharts.createSeriesMarkers(series, markers);
   chart.timeScale().fitContent();
   if (previousRange) chart.timeScale().setVisibleRange(previousRange);
   chart.subscribeCrosshairMove((point) => {
-    const bar = candles.find((item) => item.time === point.time);
+    const bar = state.liveBar?.time === point.time ? state.liveBar : candles.find((item) => item.time === point.time);
     if (!bar) return;
-    $('ohlc-readout').textContent = `${utcDate(bar.time * 1000)}  开 ${bar.open}  高 ${bar.high}  低 ${bar.low}  收 ${bar.close}  量 ${Number(bar.volume).toLocaleString()}`;
+    const isOpen = state.liveBar?.time === bar.time && state.liveBarOpen;
+    $('ohlc-readout').textContent = `${new Date(bar.time * 1000).toLocaleString()}（本机）${isOpen ? ' · 未收盘' : ''}  开 ${bar.open}  高 ${bar.high}  低 ${bar.low}  收 ${bar.close}  量 ${Number(bar.volume).toLocaleString()}`;
     const index = state.insightVisible.findIndex((item) => item.time === bar.time);
     if (index >= 0) updateInsightHover(index);
   });
@@ -221,6 +227,7 @@ function renderChart(candles, fills = [], preserveRange = false) {
   state.chartResizeObserver.observe(container);
   state.chart = chart;
   state.series = series;
+  state.volumeSeries = volume;
   state.fills = fills;
 }
 
@@ -229,6 +236,11 @@ function clearOrderBook(status) {
   $('book-best').textContent = '—';
   $('book-spread').textContent = '—';
   $('book-balance').textContent = '—';
+  $('book-balance-5').textContent = '—';
+  $('book-balance-change').textContent = '—';
+  $('book-trend').setAttribute('d', '');
+  $('book-trend-range').textContent = '等待数据';
+  state.bookHistory = [];
   $('book-received').textContent = '—';
   $('book-bids').textContent = '等待数据';
   $('book-asks').textContent = '等待数据';
@@ -238,11 +250,17 @@ function stopOrderBook(status = '已暂停') {
   ++state.orderBookGeneration;
   clearTimeout(state.orderBookReconnect);
   clearTimeout(state.orderBookStaleTimer);
+  clearTimeout(state.tapeRenderTimer);
   state.orderBookReconnect = null;
   state.orderBookStaleTimer = null;
   const socket = state.orderBookSocket;
   state.orderBookSocket = null;
   state.orderBookSymbol = null;
+  state.orderBookInterval = null;
+  state.recentTrades = [];
+  state.tapeRenderTimer = null;
+  $('tape-buy-share').textContent = '—';
+  $('recent-trades').textContent = '等待成交';
   state.orderBookAttempts = 0;
   if (socket) socket.close();
   clearOrderBook(status);
@@ -262,17 +280,20 @@ function bookAmount(value) {
   return number >= 1e6 ? `${(number / 1e6).toFixed(2)}M` : number >= 1e3 ? `${(number / 1e3).toFixed(2)}K` : number.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
-function renderBookLevels(target, levels, side) {
+function renderBookLevels(target, levels, side, receivedAt, updateId) {
   const maxNotional = Math.max(1, ...levels.map(([price, quantity]) => Number(price) * Number(quantity)));
   let cumulative = 0;
+  const received = new Date(receivedAt);
+  const shortTime = received.toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 });
   const rows = levels.map(([price, quantity]) => {
     const notional = Number(price) * Number(quantity);
     cumulative += notional;
     const row = document.createElement('div');
     row.className = `book-level ${side}`;
+    row.title = `币安现货 ${side === 'bid' ? '买盘' : '卖盘'}价位（汇总）\n价格：${price}\n数量：${quantity}\n该档名义金额：${notional}\n前 ${levels.length} 档内累计到此：${cumulative}\n本机接收：${received.toLocaleString()}\nUTC：${received.toISOString()}\n盘口更新 ID：${updateId}\n公开接口不提供挂单账号和单笔挂单时间`;
     const width = Math.max(1, Math.min(100, notional / maxNotional * 100));
     row.style.background = `linear-gradient(to left, ${side === 'bid' ? '#e7f5ef' : '#fff0ef'} ${width}%, transparent ${width}%)`;
-    for (const value of [bookPrice(price), bookAmount(quantity), bookAmount(cumulative)]) {
+    for (const value of [bookPrice(price), bookAmount(quantity), bookAmount(cumulative), shortTime]) {
       const cell = document.createElement('span'); cell.textContent = value; row.append(cell);
     }
     return row;
@@ -283,23 +304,81 @@ function renderBookLevels(target, levels, side) {
 function renderOrderBook(snapshot) {
   const bids = snapshot.bids.slice(0, 20), asks = snapshot.asks.slice(0, 20);
   if (!bids.length || !asks.length) { clearOrderBook('盘口暂无挂单'); return; }
+  if (![...bids, ...asks].every((level) => Array.isArray(level) && Number(level[0]) > 0 && Number(level[1]) >= 0 && Number.isFinite(Number(level[0]) * Number(level[1])))) { clearOrderBook('盘口数据异常'); return; }
   const bidPrice = Number(bids[0][0]), askPrice = Number(asks[0][0]);
   if (!(bidPrice > 0 && askPrice >= bidPrice)) { clearOrderBook('盘口数据异常'); return; }
-  const bidTotal = bids.reduce((sum, [price, quantity]) => sum + Number(price) * Number(quantity), 0);
-  const askTotal = asks.reduce((sum, [price, quantity]) => sum + Number(price) * Number(quantity), 0);
+  const top5 = MarketAnalytics.depth(bids, asks, 5);
+  const top20 = MarketAnalytics.depth(bids, asks, 20);
+  const receivedAt = Date.now();
   $('book-best').textContent = `${bookPrice(bids[0][0])} / ${bookPrice(asks[0][0])}`;
   $('book-spread').textContent = `${bookPrice((askPrice - bidPrice).toFixed(8))} · ${((askPrice - bidPrice) / askPrice * 100).toFixed(4)}%`;
-  $('book-balance').textContent = bidTotal + askTotal > 0 ? `${(bidTotal / (bidTotal + askTotal) * 100).toFixed(1)}%` : '—';
-  $('book-received').textContent = new Date().toLocaleTimeString();
+  $('book-balance-5').textContent = top5.buyShare === null ? '—' : `${top5.buyShare.toFixed(1)}%`;
+  $('book-balance').textContent = top20.buyShare === null ? '—' : `${top20.buyShare.toFixed(1)}%`;
+  if (top20.buyShare !== null) {
+    state.bookHistory.push({ time: receivedAt, share: top20.buyShare });
+    state.bookHistory = state.bookHistory.filter((point) => point.time >= receivedAt - 60000);
+    const first = state.bookHistory[0];
+    const change = top20.buyShare - first.share;
+    $('book-balance-change').textContent = `${change >= 0 ? '+' : ''}${change.toFixed(1)} 个百分点 · ${Math.round((receivedAt - first.time) / 1000)} 秒`;
+    const shares = state.bookHistory.map((point) => point.share);
+    const low = Math.max(0, Math.min(...shares) - 2);
+    const high = Math.min(100, Math.max(...shares) + 2);
+    const span = Math.max(8, high - low);
+    const center = (low + high) / 2;
+    const min = Math.max(0, Math.min(100 - span, center - span / 2));
+    const max = min + span;
+    $('book-trend-range').textContent = `纵轴 ${min.toFixed(1)}–${max.toFixed(1)}% · 横轴最近 60 秒`;
+    $('book-trend').setAttribute('d', state.bookHistory.map((point, index) => `${index ? 'L' : 'M'} ${(600 - (receivedAt - point.time) / 100).toFixed(1)} ${(64 - (point.share - min) / (max - min) * 56).toFixed(1)}`).join(' '));
+  }
+  $('book-received').textContent = new Date(receivedAt).toLocaleString();
   $('order-book-status').textContent = '● 实时连接中';
-  renderBookLevels('book-bids', bids, 'bid');
-  renderBookLevels('book-asks', asks, 'ask');
+  renderBookLevels('book-bids', bids, 'bid', receivedAt, snapshot.lastUpdateId);
+  renderBookLevels('book-asks', asks, 'ask', receivedAt, snapshot.lastUpdateId);
+}
+
+function renderTradeTape() {
+  state.tapeRenderTimer = null;
+  state.recentTrades = state.recentTrades.filter((trade) => trade.time >= Date.now() - 60000);
+  const flow = MarketAnalytics.flow(state.recentTrades, Date.now() - 60000);
+  $('tape-buy-share').textContent = flow.buyShare === null ? '等待成交' : `${flow.buyShare.toFixed(1)}% · ${flow.count} 条`;
+  const rows = state.recentTrades.slice(-12).reverse().map((trade) => {
+    const row = document.createElement('div');
+    row.className = 'recent-trade';
+    const time = new Date(trade.time);
+    row.title = `币安现货成交 ID：${trade.id}\n交易所成交时间：${time.toLocaleString()}\nUTC：${time.toISOString()}\n价格：${trade.price}\n数量：${trade.quantity}\n名义成交额：${Number(trade.price) * Number(trade.quantity)}\n公开接口不提供交易双方账号`;
+    for (const [value, className] of [[time.toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 }), ''], [trade.buyerMaker ? '主动卖' : '主动买', trade.buyerMaker ? 'sell' : 'buy'], [bookPrice(trade.price), ''], [bookAmount(trade.quantity), ''], [bookAmount(Number(trade.price) * Number(trade.quantity)), '']]) {
+      const cell = document.createElement('span'); cell.textContent = value; cell.className = className; row.append(cell);
+    }
+    return row;
+  });
+  $('recent-trades').replaceChildren(...rows);
+  if (!rows.length) $('recent-trades').textContent = '等待成交';
+  else state.tapeRenderTimer = setTimeout(renderTradeTape, 1000);
+}
+
+function onRecentTrade(event) {
+  if (!(Number(event.T) > 0 && Number(event.p) > 0 && Number(event.q) > 0) || typeof event.m !== 'boolean' || !Number.isFinite(Number(event.p) * Number(event.q))) return;
+  state.recentTrades.push({ id: event.a, time: Number(event.T), price: event.p, quantity: event.q, buyerMaker: event.m === true });
+  if (!state.tapeRenderTimer) state.tapeRenderTimer = setTimeout(renderTradeTape, 250);
+}
+
+function onCurrentKline(event) {
+  if (!state.chartLiveMode || !state.chart || event.s !== state.chartSymbol || event.k?.i !== state.chartInterval) return;
+  const bar = MarketAnalytics.candle(event.k);
+  if (!bar || bar.time < state.candles.at(-1).time || bar.time < (state.liveBar?.time || 0)) return;
+  state.liveBar = bar;
+  state.liveBarOpen = bar.isOpen;
+  state.series.update(state.chartStyle === 'line' ? { time: bar.time, value: bar.close } : { time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close });
+  state.volumeSeries.update({ time: bar.time, value: Number(bar.volume), color: bar.close >= bar.open ? '#a7dccc' : '#f3b3b3' });
+  $('chart-live-status').textContent = `${state.liveBarOpen ? '● 实时更新 · 当前 K 线未收盘' : '● K 线已收盘'} · ${new Date(Number(event.E)).toLocaleTimeString()} 本机`;
 }
 
 function connectOrderBook(symbol, generation) {
   if (generation !== state.orderBookGeneration || !orderBookActive()) return;
   let socket;
-  try { socket = new WebSocket(`wss://data-stream.binance.vision/ws/${symbol.toLowerCase()}@depth20`); }
+  const interval = state.orderBookInterval;
+  const stream = `${symbol.toLowerCase()}@depth20/${symbol.toLowerCase()}@aggTrade/${symbol.toLowerCase()}@kline_${interval}`;
+  try { socket = new WebSocket(`wss://data-stream.binance.vision/stream?streams=${stream}`); }
   catch { clearOrderBook('无法建立盘口连接'); return; }
   state.orderBookSocket = socket;
   clearOrderBook('正在连接实时盘口…');
@@ -307,12 +386,16 @@ function connectOrderBook(symbol, generation) {
   socket.onmessage = (event) => {
     if (generation !== state.orderBookGeneration || !orderBookActive()) return;
     try {
-      const snapshot = JSON.parse(event.data);
-      if (!Array.isArray(snapshot.bids) || !Array.isArray(snapshot.asks) || !Number.isSafeInteger(snapshot.lastUpdateId)) return;
-      state.orderBookAttempts = 0;
-      renderOrderBook(snapshot);
-      clearTimeout(state.orderBookStaleTimer);
-      state.orderBookStaleTimer = setTimeout(() => clearOrderBook('超过 10 秒无更新 · 等待盘口'), 10000);
+      const packet = JSON.parse(event.data);
+      const data = packet.data;
+      if (!data) return;
+      if (Array.isArray(data.bids) && Array.isArray(data.asks) && Number.isSafeInteger(data.lastUpdateId)) {
+        state.orderBookAttempts = 0;
+        renderOrderBook(data);
+        clearTimeout(state.orderBookStaleTimer);
+        state.orderBookStaleTimer = setTimeout(() => clearOrderBook('超过 10 秒无更新 · 等待盘口'), 10000);
+      } else if (data.e === 'aggTrade') onRecentTrade(data);
+      else if (data.e === 'kline') onCurrentKline(data);
     } catch { $('order-book-status').textContent = '盘口消息无效'; }
   };
   socket.onerror = () => { if (generation === state.orderBookGeneration) { $('order-book-status').textContent = '连接出错 · 等待重连'; socket.close(); } };
@@ -330,9 +413,11 @@ function connectOrderBook(symbol, generation) {
 function startOrderBook(symbol) {
   if (!orderBookActive()) return;
   if (!window.WebSocket) { clearOrderBook('浏览器不支持实时连接'); return; }
-  if (state.orderBookSymbol === symbol && (state.orderBookSocket || state.orderBookReconnect)) return;
+  const interval = $('interval').value;
+  if (state.orderBookSymbol === symbol && state.orderBookInterval === interval && (state.orderBookSocket || state.orderBookReconnect)) return;
   stopOrderBook('正在切换交易对…');
   state.orderBookSymbol = symbol;
+  state.orderBookInterval = interval;
   connectOrderBook(symbol, state.orderBookGeneration);
 }
 
@@ -348,6 +433,13 @@ async function loadMarket() {
     const data = await api(`/api/candles?${query()}`);
     if (requestId !== state.marketRequestId) return;
     state.candles = data.candles;
+    state.chartSymbol = data.symbol;
+    state.chartInterval = data.interval;
+    state.chartLiveMode = $('end').value > utcDate(new Date());
+    state.liveBar = data.last_candle_open ? data.candles.at(-1) : null;
+    state.liveBarOpen = data.last_candle_open;
+    state.insightRangeKey = null;
+    clearTimeout(state.insightTimer);
     state.marketSymbol = data.symbol;
     state.insights = data.insights || [];
     state.rangeDays = [...new Set(data.candles.map((bar) => utcDate(bar.time * 1000)))];
@@ -356,6 +448,7 @@ async function loadMarket() {
     $('stat-count').textContent = `${data.candles.length} 根`;
     $('stat-source').textContent = data.source;
     $('stat-time').textContent = `获取于 ${new Date(data.fetched_at).toLocaleString()}`;
+    $('chart-live-status').textContent = data.last_candle_open ? '● 当前 K 线未收盘 · 等待实时更新' : '历史 K 线 · 已收盘';
     renderChart(data.candles);
     setupRangeNavigator();
     renderMarketList();
@@ -395,7 +488,12 @@ function syncRangeLabels() {
   $('range-readout').textContent = `${start} → ${addUtcDays(end, -1)}（UTC）`;
   $('range-selection').style.left = `${startIndex / days.length * 100}%`;
   $('range-selection').style.width = `${(endIndex - startIndex) / days.length * 100}%`;
-  renderInsights(start, end);
+  const key = `${start}|${end}`;
+  if (key !== state.insightRangeKey) {
+    state.insightRangeKey = key;
+    clearTimeout(state.insightTimer);
+    state.insightTimer = setTimeout(() => renderInsights(start, end), 80);
+  }
 }
 
 function applyRangeFromSlider(changed) {

@@ -101,7 +101,7 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
     def home():
         return render_template("index.html")
 
-    def market_request(payload):
+    def market_request(payload, *, include_open=False):
         symbol = str(payload.get("symbol", "")).upper()
         interval = payload.get("interval", "1d")
         if not re.fullmatch(r"[A-Z0-9]{4,24}", symbol) or interval not in INTERVALS:
@@ -113,6 +113,10 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
             end = datetime.combine(date.fromisoformat(payload["end"]), datetime.min.time(), timezone.utc)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("日期必须为 YYYY-MM-DD") from error
+        now = datetime.now(timezone.utc)
+        interval_seconds = int(INTERVALS[interval].total_seconds())
+        current_open = datetime.fromtimestamp(int(now.timestamp()) // interval_seconds * interval_seconds, timezone.utc)
+        end = min(end, current_open + INTERVALS[interval] if include_open else current_open)
         if start >= end:
             raise ValueError("日期范围无效")
         if (end - start) / INTERVALS[interval] > 3000:
@@ -136,10 +140,11 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
 
     @app.get("/api/candles")
     def candles():
-        data = market_request(request.args)
+        data = market_request(request.args, include_open=True)
         if not data.source.startswith("cache:"):
             save_market_cache(app.extensions["store"], data)
-        return jsonify(symbol=data.symbol, interval=data.interval, source=data.source, fetched_at=data.fetched_at.isoformat(), checksum=data.checksum, candles=[{"time": int(bar.open_at.timestamp()), "open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": str(bar.volume)} for bar in data.candles], insights=calculate_insights(data.candles))
+        last_candle_open = data.candles[-1].open_at + INTERVALS[data.interval] > datetime.now(timezone.utc)
+        return jsonify(symbol=data.symbol, interval=data.interval, source=data.source, fetched_at=data.fetched_at.isoformat(), checksum=data.checksum, last_candle_open=last_candle_open, candles=[{"time": int(bar.open_at.timestamp()), "open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": str(bar.volume)} for bar in data.candles], insights=calculate_insights(data.candles))
 
     @app.post("/api/research")
     def research():
