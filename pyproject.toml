@@ -1,0 +1,11 @@
+[project]
+name = "crypto-workbench"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["Flask>=3.1,<4", "cryptography>=44", "requests>=2.32"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
