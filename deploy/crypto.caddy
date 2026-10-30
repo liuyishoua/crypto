@@ -1,0 +1,19 @@
+{
+	admin off
+	auto_https disable_redirects
+}
+https://d.58nft.net:9466 {
+	encode zstd gzip
+	tls /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/d.58nft.net/d.58nft.net.crt /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/d.58nft.net/d.58nft.net.key
+	request_body {
+		max_size 1MB
+	}
+	request_header -X-Workspace-Id
+	request_header -X-Workspace-Name
+	request_header -X-Workspace-Role
+	@protected not path /health
+	forward_auth @protected 127.0.0.1:8787 {
+		uri /api/auth/access/gate/crypto
+	}
+	reverse_proxy 127.0.0.1:8900
+}

@@ -6,6 +6,7 @@ dependencies = ["Flask>=3.1,<4", "cryptography>=44", "requests>=2.32", "binance-
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+deploy = ["gunicorn>=26,<27"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

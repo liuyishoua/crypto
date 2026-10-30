@@ -1,0 +1,12 @@
+{% macro icon(name) -%}
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{% if name == 'market' %}<path d="M4 19h16M7 14V6m5 10V4m5 10V8"/><rect x="5" y="8" width="4" height="4"/><rect x="10" y="6" width="4" height="7"/><rect x="15" y="10" width="4" height="5"/>
+{% elif name == 'strategy' %}<path d="M9 3h6m-5 0v6L4 19a1.3 1.3 0 0 0 1 2h14a1.3 1.3 0 0 0 1-2L14 9V3M7 15h10"/>
+{% elif name == 'records' %}<path d="M5 4h14v17H5zM8 4V2m8 2V2M8 9h8m-8 4h8m-8 4h5"/>
+{% elif name == 'assets' %}<path d="M4 6h15v15H4zM4 6V4h13v2m-2 6h6v5h-6z"/><path d="M17.5 14.5h.01"/>
+{% elif name == 'trade' %}<path d="M4 8h16m-4-4 4 4-4 4M20 16H4m4 4-4-4 4-4"/>
+{% elif name == 'settings' %}<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--surface)"/><circle cx="16" cy="12" r="2" fill="var(--surface)"/><circle cx="8" cy="18" r="2" fill="var(--surface)"/>
+{% elif name == 'back' %}<path d="m10 5-7 7 7 7M3 12h17"/>
+{% elif name == 'theme' %}<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1"/>
+{% endif %}</svg>
+{%- endmacro %}

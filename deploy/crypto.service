@@ -1,0 +1,21 @@
+[Unit]
+Description=Crypto personal research workspace
+After=network-online.target ops-hub.service
+Wants=network-online.target
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/leo-project/crypto
+Environment=CRYPTO_PUBLIC_ORIGIN=https://d.58nft.net:9466
+Environment=OPS_IDENTITY_URL=http://127.0.0.1:8787
+ExecStart=/home/ubuntu/leo-project/crypto/.venv/bin/gunicorn --bind 127.0.0.1:8900 --control-socket /home/ubuntu/leo-project/crypto/.runtime/gunicorn.ctl --workers 1 --threads 8 --timeout 90 crypto_app.wsgi:app
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/leo-project/crypto/.runtime
+MemoryMax=512M
+[Install]
+WantedBy=multi-user.target

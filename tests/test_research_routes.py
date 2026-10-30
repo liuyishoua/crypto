@@ -103,7 +103,7 @@ def test_home_has_chart_and_simulation_status(tmp_path):
     assert 'id="strategy-source-list"' in page
     assert "binance_paper_trade" in page
     assert "hbot start" in page
-    assert 'src="/static/market_analytics.js"' in page
+    assert 'src="/static/market_analytics.js?v=' in page
     assert 'id="book-balance-5"' in page
     assert 'id="book-balance-change"' in page
     assert 'id="book-trend"' in page

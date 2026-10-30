@@ -1,0 +1,13 @@
+[Unit]
+Description=Crypto HTTPS workspace access
+After=network.target crypto.service ops-hub.service
+[Service]
+User=caddy
+Group=caddy
+Environment=GOMEMLIMIT=40MiB
+ExecStart=/usr/bin/caddy run --config /etc/caddy/crypto.caddy --adapter caddyfile
+Restart=on-failure
+RestartSec=3
+MemoryMax=96M
+[Install]
+WantedBy=multi-user.target

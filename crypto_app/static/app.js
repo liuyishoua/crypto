@@ -1,27 +1,59 @@
 const $ = (id) => document.getElementById(id);
+const favoritesKey = `crypto-market-favorites:${document.body.dataset.userId || 'local'}`;
 const state = { chart: null, series: null, volumeSeries: null, candles: [], liveBar: null, liveBarOpen: false, chartSymbol: null, chartInterval: null, chartLiveMode: false, insights: [], fills: [], rangeDays: [], chartStyle: 'candle', marketRequestId: 0, symbolRequestId: 0, symbols: [], favorites: [], marketTab: 'all', chartResizeObserver: null, syncingRange: false, insightVisible: [], insightRangeKey: null, insightTimer: null, marketSymbol: null, orderBookSocket: null, orderBookSymbol: null, orderBookInterval: null, orderBookGeneration: 0, orderBookStaleTimer: null, orderBookPollTimer: null, orderBookPollController: null, orderBookMode: null, orderBookPollErrors: 0, lastTradeId: null, bookHistory: [], bookDepthShare: null, bookConnectedAt: null, recentTrades: [], tapeRenderTimer: null, strategySources: [], selectedStrategySource: null, strategySourcesLoaded: false };
 
 function csrf() {
-  const item = document.cookie.split('; ').find((part) => part.startsWith('csrf_token='));
+  const name = document.querySelector('meta[name="csrf-cookie"]')?.content || 'csrf_token';
+  const item = document.cookie.split('; ').find((part) => part.startsWith(name + '='));
   return item ? decodeURIComponent(item.split('=')[1]) : '';
 }
 
 async function api(path, options = {}) {
+  if (document.body.dataset.authorizationLost) throw new Error('访问权限已失效，请重新登录或申请权限。');
   const method = options.method || 'GET';
   const headers = method === 'GET' ? {} : { 'Content-Type': 'application/json', 'X-App-Request': '1', 'X-CSRF-Token': csrf() };
   const response = await fetch(path, { ...options, headers: { ...headers, ...(options.headers || {}) } });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || '请求失败');
+  if (response.status === 401 || response.status === 403 && (body.access_url || body.login_url)) loseAuthorization(body);
+  if (!response.ok) throw new Error(body.error || body.detail || '请求失败');
   return body;
 }
 
-function toast(message) {
+function toast(message, kind = 'success') {
   const element = $('toast');
-  element.textContent = message;
+  element.replaceChildren(document.createTextNode(message));
+  element.dataset.kind = kind;
+  const close = document.createElement('button');
+  close.type = 'button'; close.textContent = '×'; close.setAttribute('aria-label','关闭提示');
+  close.addEventListener('click',()=>element.classList.remove('show'));
+  element.append(close);
   element.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => element.classList.remove('show'), 4500);
+  if (kind !== 'error') toast.timer = setTimeout(() => element.classList.remove('show'), 4500);
 }
+
+function loseAuthorization(body) {
+  document.body.dataset.authorizationLost = '1';
+  stopOrderBook('访问权限已失效');
+  document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());
+  document.querySelector('.shell').hidden = true;
+  document.querySelectorAll('input,textarea').forEach(input=>input.value='');
+  const notice = document.createElement('main'); notice.className = 'auth-notice';
+  const heading = document.createElement('h1'); heading.textContent = body.login_url ? '请重新登录' : '需要应用权限';
+  const message = document.createElement('p'); message.textContent = body.error || body.detail || '请到彩虹桥检查你的应用权限。';
+  const link = document.createElement('a'); link.href = body.login_url ? 'https://d.58nft.net:9461/login?return=crypto' : 'https://d.58nft.net/permissions?app=crypto';
+  link.textContent = body.login_url ? '登录彩虹桥' : '前往申请权限';
+  notice.append(heading,message,link); document.body.append(notice);
+}
+
+function chartPalette() {
+  const style = getComputedStyle(document.documentElement);
+  return {background:style.getPropertyValue('--surface').trim() || '#ffffff',text:style.getPropertyValue('--muted').trim() || '#667085',line:style.getPropertyValue('--line').trim() || '#e8ebf0'};
+}
+window.addEventListener('workspace-theme-change',()=>{
+  const palette = chartPalette();
+  state.chart?.applyOptions({layout:{background:{color:palette.background},textColor:palette.text},grid:{vertLines:{color:palette.line},horzLines:{color:palette.line}},rightPriceScale:{borderColor:palette.line},timeScale:{borderColor:palette.line}});
+});
 
 function query() {
   return new URLSearchParams({ symbol: $('symbol').value.trim().toUpperCase(), interval: $('interval').value, start: $('start').value, end: $('end').value });
@@ -33,7 +65,7 @@ function showPage(name) {
   document.querySelectorAll('.navlink').forEach((button) => button.classList.toggle('active', button.dataset.page === name));
   const titles = { market: '研究 / 现货市场', strategy: '研究 / 策略实验室', records: '研究 / 回测记录', assets: '账户 / 资产总览', trade: '交易 / 真实币安现货', settings: '账户 / 连接与风控' };
   $('topbar-title').textContent = titles[name];
-  $('topbar-mode').textContent = name === 'trade' ? '● 真实交易 · 逐笔确认' : name === 'assets' || name === 'settings' ? '● 本机账户 · 只读默认' : '● 研究模式 · 模拟结果';
+  $('topbar-mode').textContent = name === 'trade' ? '真实交易 · 逐笔确认' : name === 'assets' || name === 'settings' ? '个人空间 · 只读默认' : '研究模式 · 模拟结果';
   $('topbar-mode').classList.toggle('live-mode', name === 'trade');
   if (name === 'records') loadRecords();
   if (name === 'strategy' && !state.strategySourcesLoaded) loadStrategySources();
@@ -62,11 +94,11 @@ async function configureTrade() {
     await api('/api/trade/settings', { method: 'POST', body: JSON.stringify(data) });
     $('trade-key').value = ''; $('trade-secret').value = ''; $('trade-passphrase').value = '';
     await loadTradeSettings(); toast('真实交易已启用。每笔订单仍需预检与解锁。');
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 async function disableTrade() {
   try { await api('/api/trade/settings/disable', { method: 'POST', body: '{}' }); await loadTradeSettings(); toast('真实交易已关闭。'); }
-  catch (error) { toast(error.message); }
+  catch (error) { toast(error.message, 'error'); }
 }
 function showTradeDialog(title, lines, button, action) {
   $('trade-dialog-title').textContent = title;
@@ -85,7 +117,7 @@ async function previewTrade() {
       toast(`提交请求已处理；订单状态：${formatOrderStatus(order.status)}。`);
       await loadTradeOrders();
     });
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 async function loadTradeOrders() {
   try {
@@ -93,7 +125,7 @@ async function loadTradeOrders() {
     $('trade-orders').replaceChildren(...data.items.map((item) => {
       const row = document.createElement('tr');
       assetCell(row, [new Date(item.created_at).toLocaleString(), item.symbol, `${item.side === 'BUY' ? '买入' : '卖出'} / ${item.type === 'MARKET' ? '市价' : '限价'}`, item.quantity, formatOrderStatus(item.status), item.executed_qty]);
-      const cell = document.createElement('td'); const check = document.createElement('button'); check.textContent = '核实'; check.addEventListener('click', async () => { try { const detail = await api(`/api/trade/orders/${item.client_order_id}`); toast(`${detail.symbol}：${formatOrderStatus(detail.status)}，已成交 ${detail.executed_qty}`); await loadTradeOrders(); } catch (error) { toast(error.message); } }); cell.append(check);
+      const cell = document.createElement('td'); const check = document.createElement('button'); check.textContent = '核实'; check.addEventListener('click', async () => { try { const detail = await api(`/api/trade/orders/${item.client_order_id}`); toast(`${detail.symbol}：${formatOrderStatus(detail.status)}，已成交 ${detail.executed_qty}`); await loadTradeOrders(); } catch (error) { toast(error.message, 'error'); } }); cell.append(check);
       if (!['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'].includes(item.status) && !item.cancel_requested) {
         const cancel = document.createElement('button'); cancel.textContent = '取消'; cancel.addEventListener('click', () => showTradeDialog('取消真实订单', [['交易对', item.symbol], ['当前状态', formatOrderStatus(item.status)], ['客户端订单 ID', item.client_order_id]], '解锁并请求取消', async (passphrase) => { const order = await api(`/api/trade/orders/${item.client_order_id}/cancel`, { method: 'POST', body: JSON.stringify({ passphrase }) }); toast(`取消请求已处理；订单状态：${formatOrderStatus(order.status)}。`); await loadTradeOrders(); })); cell.append(cancel);
       }
@@ -107,7 +139,7 @@ async function submitTradeDialog() {
   if (!passphrase) { toast('请输入交易解锁口令。'); return; }
   $('trade-dialog-submit').disabled = true;
   try { await tradeDialogAction(passphrase); $('trade-dialog').close(); }
-  catch (error) { toast(error.message); }
+  catch (error) { toast(error.message, 'error'); }
   finally { $('trade-unlock').value = ''; $('trade-dialog-submit').disabled = false; }
 }
 
@@ -145,7 +177,7 @@ async function loadAssets() {
     const notices = Object.entries(data.errors).map(([source, message]) => `${message}。上次成功 ${data.last_success[source] ? new Date(data.last_success[source]).toLocaleString() : '未知'}`);
     Object.entries(data.discovery).forEach(([chain, status]) => { if (!status.complete) notices.push(`${chain === '1' ? 'Ethereum' : 'BNB Smart Chain'} 资产发现不完整：${status.error || '索引器暂不可用'}；已知余额仍显示。上次完整发现 ${data.last_success[chain] ? new Date(data.last_success[chain]).toLocaleString() : '未知'}`); });
     $('asset-notices').replaceChildren(...notices.map((message) => { const element = document.createElement('p'); element.className = 'asset-notice'; element.textContent = message; return element; }));
-  } catch (error) { if (requestId === assetRequest) { $('asset-status').textContent = '查询失败'; toast(error.message); } }
+  } catch (error) { if (requestId === assetRequest) { $('asset-status').textContent = '查询失败'; toast(error.message, 'error'); } }
 }
 
 async function connectWallet() {
@@ -153,7 +185,7 @@ async function connectWallet() {
     if (!window.cryptoWallet) throw new Error('MetaMask Connect 尚未加载');
     $('wallet-address').value = await window.cryptoWallet.selectAddress();
     await loadAssets();
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 async function connectReadKey() {
@@ -161,7 +193,7 @@ async function connectReadKey() {
     await api('/api/binance/read-credentials', { method: 'POST', body: JSON.stringify({ key: $('read-key').value.trim(), secret: $('read-secret').value }) });
     $('read-key').value = ''; $('read-secret').value = '';
     toast('币安只读账户已连接。');
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 const intervalSeconds = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
@@ -200,7 +232,8 @@ function renderChart(candles, fills = [], preserveRange = false) {
   const previousRange = preserveRange && state.chart ? state.chart.timeScale().getVisibleRange() : null;
   state.chartResizeObserver?.disconnect();
   if (state.chart) state.chart.remove();
-  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: '#ffffff' }, textColor: '#667085' }, grid: { vertLines: { color: '#f3f5f8' }, horzLines: { color: '#f3f5f8' } }, rightPriceScale: { borderColor: '#e8ebf0' }, localization: { timeFormatter: (time) => MarketPresentation.clock(Number(time) * 1000) + ' 北京时间' }, timeScale: { borderColor: '#e8ebf0', timeVisible: $('interval').value !== '1d', tickMarkFormatter: (time) => MarketPresentation.chartTime(time, $('interval').value) }, handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } });
+  const palette = chartPalette();
+  const chart = LightweightCharts.createChart(container, { width: container.clientWidth, height: container.clientHeight, layout: { background: { color: palette.background }, textColor: palette.text }, grid: { vertLines: { color: palette.line }, horzLines: { color: palette.line } }, rightPriceScale: { borderColor: palette.line }, localization: { timeFormatter: (time) => MarketPresentation.clock(Number(time) * 1000) + ' 北京时间' }, timeScale: { borderColor: palette.line, timeVisible: $('interval').value !== '1d', tickMarkFormatter: (time) => MarketPresentation.chartTime(time, $('interval').value) }, handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true }, handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true } });
   const series = state.chartStyle === 'line' ? chart.addSeries(LightweightCharts.LineSeries, { color: '#347fe8', lineWidth: 2 }) : chart.addSeries(LightweightCharts.CandlestickSeries, { upColor: '#249e81', downColor: '#df6a6a', borderVisible: false, wickUpColor: '#249e81', wickDownColor: '#df6a6a' });
   series.setData(candles.map(({ time, open, high, low, close }) => state.chartStyle === 'line' ? { time, value: close } : { time, open, high, low, close }));
   const volume = chart.addSeries(LightweightCharts.HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', lastValueVisible: false, priceLineVisible: false });
@@ -676,7 +709,7 @@ function renderMarketList() {
   $('market-list').replaceChildren(...items.slice(0, 100).map((item) => {
     const row = document.createElement('div'); row.className = 'market-row'; row.setAttribute('role', 'listitem');
     const favorite = document.createElement('button'); favorite.type = 'button'; favorite.className = 'market-favorite'; favorite.textContent = state.favorites.includes(item.symbol) ? '★' : '☆'; favorite.setAttribute('aria-label', `${state.favorites.includes(item.symbol) ? '取消自选' : '加入自选'} ${item.symbol}`);
-    favorite.addEventListener('click', () => { state.favorites = state.favorites.includes(item.symbol) ? state.favorites.filter((name) => name !== item.symbol) : [...state.favorites, item.symbol]; localStorage.setItem('crypto-market-favorites', JSON.stringify(state.favorites)); renderMarketList(); });
+    favorite.addEventListener('click', () => { state.favorites = state.favorites.includes(item.symbol) ? state.favorites.filter((name) => name !== item.symbol) : [...state.favorites, item.symbol]; localStorage.setItem(favoritesKey, JSON.stringify(state.favorites)); renderMarketList(); });
     const select = document.createElement('button'); select.type = 'button'; select.className = `market-pair${$('symbol').value === item.symbol ? ' active' : ''}`; select.setAttribute('aria-label', `查看 ${item.symbol} 行情`);
     const name = document.createElement('span'); name.className = 'market-name'; const title = document.createElement('strong'); title.textContent = item.base; const detail = document.createElement('small'); detail.textContent = item.quote; name.append(title, detail);
     const move = document.createElement('span'); move.className = 'market-move'; const change = Number(item.change_percent); move.textContent = item.change_percent === null ? '—' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`; move.classList.add(item.change_percent === null ? 'unverified' : change >= 0 ? 'positive' : 'negative'); const volume = document.createElement('small'); volume.textContent = item.status === 'UNVERIFIED' ? '未核验' : formatVolume(item.quote_volume); move.append(volume);
@@ -704,7 +737,7 @@ async function loadSymbols() {
 }
 
 function initializeMarketExplorer() {
-  try { const saved = JSON.parse(localStorage.getItem('crypto-market-favorites') || '[]'); state.favorites = Array.isArray(saved) ? saved.filter((value) => typeof value === 'string') : []; }
+  try { const saved = JSON.parse(localStorage.getItem(favoritesKey) || '[]'); state.favorites = Array.isArray(saved) ? saved.filter((value) => typeof value === 'string') : []; }
   catch { state.favorites = []; }
   setPreset(90, false);
   loadSymbols();
@@ -747,7 +780,7 @@ async function runBacktest() {
     $('fills-body').replaceChildren(...result.fills.map((fill) => { const row = document.createElement('tr'); [fill.signal_at, fill.filled_at, fill.side === 'BUY' ? '模拟买入' : '模拟卖出', fill.quantity, fill.price, fill.fee, fill.cash_after, fill.coins_after].forEach((value) => { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }); return row; }));
     if (state.candles.length) renderChart(state.candles, result.fills, true);
     toast(`回测 #${id} 已保存。历史模拟不代表未来收益。`);
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 async function saveResearch() {
@@ -756,7 +789,7 @@ async function saveResearch() {
     if (!url) throw new Error('请先填写策略来源链接。');
     await api('/api/research', { method: 'POST', body: JSON.stringify({ kind: $('strategy-kind').value, parameters: parameters(), version: '1', source_url: url, note: $('research-note').value }) });
     toast('策略来源与笔记已保存。');
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 function chooseStrategySource(item) {
@@ -816,7 +849,7 @@ async function saveExternalStrategyNote() {
     $('external-strategy-note').value = '';
     toast('来源版本与学习笔记已保存。');
     loadSavedSourceNotes();
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 async function loadRecords() {
@@ -824,7 +857,7 @@ async function loadRecords() {
     const data = await api('/api/backtests');
     $('records-list').replaceChildren(...data.items.map((item) => { const button = document.createElement('button'); button.textContent = `#${item.id} · ${item.symbol} · ${item.strategy_kind} · 收益 ${item.total_return}`; button.addEventListener('click', async () => { const detail = await api(`/api/backtests/${item.id}`); toast(`${detail.symbol}：${detail.fills.length} 笔模拟成交，数据版本 ${detail.data_checksum.slice(0, 10)}`); }); return button; }));
     if (!data.items.length) $('records-list').textContent = '暂无回测记录。';
-  } catch (error) { toast(error.message); }
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 document.querySelectorAll('.navlink').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page)));
@@ -864,3 +897,9 @@ $('chart-fit').addEventListener('click', () => { if (state.chart) { state.chart.
 for (const [id, factor] of [['chart-zoom-in', 0.75], ['chart-zoom-out', 1.35]]) $(id).addEventListener('click', () => { const scale = state.chart?.timeScale(); const range = scale?.getVisibleLogicalRange(); if (!range) return; const center = (range.from + range.to) / 2; const half = (range.to - range.from) * factor / 2; scale.setVisibleLogicalRange({ from: center - half, to: center + half }); });
 initializeMarketExplorer();
 strategyParams();
+
+if (document.body.dataset.userId !== 'local') {
+  const checkSession = () => { if (!document.hidden && !document.body.dataset.authorizationLost) api('/api/session').catch(()=>{}); };
+  setInterval(checkSession,30000);
+  document.addEventListener('visibilitychange',checkSession);
+}

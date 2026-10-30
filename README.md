@@ -2,7 +2,35 @@
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 
-个人本机使用的加密资产现货研究与手动交易工作台。默认仅监听 `127.0.0.1`。
+加密资产现货研究与手动交易工作台。本机模式默认仅监听 `127.0.0.1`，网页部署支持彩虹桥统一登录、授权和个人空间。
+
+## 彩虹桥部署
+
+入口：[现货研究工作台](https://d.58nft.net:9466/)，也可在[彩虹桥](https://d.58nft.net/)的「其他应用」打开。应用 ID 为 `crypto`，需管理员授权；管理员默认可用。账号、密码和应用申请由 ops-hub 统一维护，没有第二套网页登录。
+
+网页位于 `/home/ubuntu/leo-project/crypto`，源仓库为 `liuyishoua/crypto`，最初代码从 Mac mini `/Users/leo/leo-project/crypto` 同步。只同步代码，不迁移 Mac 的本机运行数据或账户配置。
+
+每次请求都通过中央应用授权，HTTPS 入口与业务后端分别核验。后端只信任中央返回的数字用户 ID，不接受浏览器伪造的身份头。笔记、回测、交易状态和加密凭据分别保存在 `.runtime/users/<中央ID>/`；自选在浏览器按中央 ID 隔离。真实交易默认关闭，不随部署自动连接账户或发送订单。
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e '.[test,deploy]'
+mkdir -p .runtime
+chmod 700 .runtime
+sudo install -m 644 deploy/crypto.service deploy/crypto-proxy.service /etc/systemd/system/
+sudo install -m 644 deploy/crypto.caddy /etc/caddy/crypto.caddy
+sudo caddy validate --config /etc/caddy/crypto.caddy --adapter caddyfile
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto crypto-proxy
+```
+
+部署前在 `ops_hub/access.py` 登记 `crypto`（9466、approval、personal），授权响应需返回 `X-Workspace-Id/Name`，并重启 ops-hub。HTTPS 复用该主机现有域名证书；应用绑定 `127.0.0.1:8900`。通过页面与登录跳转检查后，最后在 `bifrost/links.json` 登记入口。独立网站不会占用门户首页或模型 API。
+
+`crypto_app.wsgi` 初次启动创建 `.runtime/master.key`（0600）。备份时同时保留它和用户运行目录，不能重新生成密钥替代已丢失的密钥；检测到已有加密凭据但没有密钥时拒绝启动。运行状态和密钥不入 Git。本机模式 `python -m crypto_app` 仍使用原来的 `CRYPTO_MASTER_KEY` 环境变量。
+
+界面使用彩虹桥配色与主题、可见中文手机导航、本地 SVG 图标和内容版本资源缓存。页面和个人接口禁用缓存；撤权后下一次请求立即拒绝，已打开的可见页面每 30 秒校验一次并在失效时隐藏业务内容。设计约定见 [DESIGN.md](DESIGN.md)。
+
+验证：`.venv/bin/python -m pytest -q`、`npm run test:wallet`，以及 `PYTHONPATH=. .venv/bin/python tests/browser_preview.py`。浏览器检查使用临时身份和数据，依赖部署机已有 Playwright/Chrome；源码中的运行位置可按实际机器调整。两项原有 Swift/JavaScriptCore 测试仅在 Mac 执行。不要使用生产账号、密钥或真实下单作为自动测试。
 
 ## 使用许可与风险声明
 
@@ -40,4 +68,4 @@
 
 “交易”页面只支持 USDT 报价的币安现货限价和市价买卖。填写交易对、方向、类型和基础币数量后，先获取有效期 30 秒的预览。预览显示估算金额、费用、滑点和限额，再输入解锁口令明确确认。取消订单也需再次输入口令。提交响应只是订单状态，不能视为成交；遇到网络超时显示“待核实”，只按原客户端订单 ID 查询，不自动重发。市场成交价可能偏离预览价，市价金额及费用上限是基于当前报价的预估，请在交易所核对最终成交。
 
-本服务仅在 `127.0.0.1:8765` 监听，未实现公网登录认证。不要映射到局域网或公网。自动测试全部使用假交易所，不会发送真实订单；首次使用交易密钥时，请在币安侧仔细核对权限并自行逐笔确认。
+本机启动方式仅在 `127.0.0.1:8765` 监听，不提供独立登录；公网部署必须使用上文的彩虹桥入口和 `crypto_app.wsgi`，不能直接公开本机启动端口。自动测试全部使用假交易所，不会发送真实订单；首次使用交易密钥时，请在币安侧仔细核对权限并自行逐笔确认。

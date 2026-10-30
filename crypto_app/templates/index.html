@@ -1,36 +1,42 @@
+{% from "icons.html" import icon %}
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>现货研究工作台</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script defer src="/static/wallet.js"></script>
-  <script defer src="/static/market_analytics.js"></script>
-  <script defer src="/static/market_presentation.js"></script>
-  <script defer src="/static/app.js"></script>
+  <meta name="csrf-cookie" content="{{ csrf_cookie_name }}">
+  <script src="{{ asset('theme.js') }}"></script>
+  <link rel="icon" href="{{ asset('crypto.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
+  <link rel="stylesheet" href="{{ asset('portal.css') }}">
+  <script defer src="{{ asset('vendor/lightweight-charts.standalone.production.js') }}"></script>
+  <script defer src="{{ asset('wallet.js') }}"></script>
+  <script defer src="{{ asset('market_analytics.js') }}"></script>
+  <script defer src="{{ asset('market_presentation.js') }}"></script>
+  <script defer src="{{ asset('app.js') }}"></script>
 </head>
-<body>
+<body data-user-id="{{ workspace_user.id if workspace_user else 'local' }}">
+  <a class="skip-link" href="#workspace-main">跳到工作区</a>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brandmark">◈</span><span>现货研究</span></div>
-      <div class="navcaption">WORKSPACE</div>
+      <div class="brand"><span class="brandmark"><img src="{{ asset('crypto.svg') }}" alt="" width="36" height="36"></span><span>现货研究</span></div>
+
       <nav aria-label="主导航">
-        <button class="navlink active" data-page="market">▧ <span>市场</span></button>
-        <button class="navlink" data-page="strategy">◫ <span>策略实验室</span></button>
-        <button class="navlink" data-page="records">◷ <span>回测记录</span></button>
-        <button class="navlink" data-page="assets">◈ <span>资产</span></button>
-        <button class="navlink" data-page="trade">⇄ <span>交易</span></button>
-        <button class="navlink" data-page="settings">⚙ <span>设置</span></button>
+        <button class="navlink active" data-page="market">{{ icon('market') }} <span>市场</span></button>
+        <button class="navlink" data-page="strategy">{{ icon('strategy') }} <span>策略实验室</span></button>
+        <button class="navlink" data-page="records">{{ icon('records') }} <span>回测记录</span></button>
+        <button class="navlink" data-page="assets">{{ icon('assets') }} <span>资产</span></button>
+        <button class="navlink" data-page="trade">{{ icon('trade') }} <span>交易</span></button>
+        <button class="navlink" data-page="settings">{{ icon('settings') }} <span>设置</span></button>
       </nav>
-      <div class="sidefoot">个人研究工作台<br><b>数据与信号需独立核实</b></div>
+      <div class="sidefoot">{{ '彩虹桥 · 个人空间' if workspace_user else '本机 · 个人空间' }}<br><b>数据与信号需独立核实</b></div>
     </aside>
-    <main class="main">
-      <header class="topbar"><span id="topbar-title">研究 / 现货市场</span><span id="topbar-mode" class="mode">● 研究模式 · 模拟结果</span></header>
+    <main class="main" id="workspace-main">
+      <header class="topbar"><span id="topbar-title">研究 / 现货市场</span><span id="topbar-mode" class="mode">研究模式 · 模拟结果</span><div class="workspace-account">{% if workspace_user %}<a class="portal-return" href="https://d.58nft.net/">{{ icon('back') }}彩虹桥</a><span class="account-name" title="{{ workspace_user.name }}">{{ workspace_user.name }} · 个人空间</span>{% endif %}<button class="theme-toggle" type="button" aria-label="切换明暗主题">{{ icon('theme') }}</button></div></header>
       <div class="content">
         <section class="page active" id="page-market">
-          <div class="pagehead"><div><div class="eyebrow">MARKET EXPLORER</div><h1>从币种列表，走到自己的判断。</h1><p class="subtitle">先选币，再拖动时间轴；所有指标都能追溯到现货 K 线。</p></div><span class="pill">币安公开现货 · 无需密钥</span></div>
+          <div class="pagehead"><div><h1>现货市场</h1><p class="subtitle">先选币，再拖动时间轴；所有指标都能追溯到现货 K 线。</p></div><span class="pill">币安公开现货 · 无需密钥</span></div>
           <div class="market-layout">
             <aside class="panel market-browser" aria-label="现货币种列表">
               <div class="paneltitle"><h2>市场列表</h2><span class="pill subtle">现货</span></div>
@@ -67,7 +73,7 @@
           </div>
         </section>
         <section class="page" id="page-strategy">
-          <div class="pagehead"><div><div class="eyebrow">STRATEGY LAB</div><h1>把观点写成规则。</h1><p class="subtitle">先记录来源，再用同一段历史数据检验规则。</p></div><span class="pill">模拟交易</span></div>
+          <div class="pagehead"><div><h1>把观点写成规则。</h1><p class="subtitle">先记录来源，再用同一段历史数据检验规则。</p></div><span class="pill">模拟交易</span></div>
           <div class="panel"><div class="paneltitle"><h2>策略参数</h2></div><div class="panelbody formgrid">
             <label>策略 <select id="strategy-kind"><option value="sma_cross">均线交叉</option><option value="breakout">区间突破</option><option value="dca">定投</option><option value="buy_hold">买入持有</option></select></label>
             <label>初始模拟资金 (USDT) <input id="initial-cash" type="number" min="1" value="1000"></label>
@@ -86,9 +92,9 @@ hbot history
 hbot stop</pre><p class="hint">运行前确认实例当前配置确实是 <code>binance_paper_trade</code>；<code>hbot start</code> 操作该实例当前配置。工作台暂不代为执行命令或读取 Hummingbot 密钥。可把观察到的规则与结果记在上方研究笔记中。</p></div></div>
           <div class="panel"><div class="paneltitle"><h2>模拟结果</h2><span class="pill subtle">仅供学习</span></div><div class="panelbody"><div id="backtest-summary" class="resultgrid">选择策略并运行回测后查看结果。</div><div class="tablewrap"><table><thead><tr><th>信号时间</th><th>模拟成交时间</th><th>方向</th><th>数量</th><th>价格</th><th>费用</th><th>剩余现金</th><th>持币</th></tr></thead><tbody id="fills-body"></tbody></table></div></div></div>
         </section>
-        <section class="page" id="page-records"><div class="pagehead"><div><div class="eyebrow">HISTORY</div><h1>回测记录</h1><p class="subtitle">按数据版本、策略版本和费用假设追溯结果。</p></div></div><div class="panel"><div class="panelbody" id="records-list">运行回测后会显示记录。</div></div></section>
+        <section class="page" id="page-records"><div class="pagehead"><div><h1>回测记录</h1><p class="subtitle">按数据版本、策略版本和费用假设追溯结果。</p></div></div><div class="panel"><div class="panelbody" id="records-list">运行回测后会显示记录。</div></div></section>
         <section class="page" id="page-assets">
-          <div class="pagehead"><div><div class="eyebrow">PORTFOLIO</div><h1>资产总览</h1><p class="subtitle">分别核对币安现货和钱包资产；缺价项目保留余额。</p></div><span class="pill">只读查询</span></div>
+          <div class="pagehead"><div><h1>资产总览</h1><p class="subtitle">分别核对币安现货和钱包资产；缺价项目保留余额。</p></div><span class="pill">只读查询</span></div>
           <div class="panel"><div class="paneltitle"><h2>钱包地址</h2><span class="pill subtle">Ethereum · BNB Smart Chain</span></div><div class="panelbody"><div class="asset-controls"><label>公开地址 <input id="wallet-address" placeholder="0x…" autocomplete="off" spellcheck="false"></label><button id="connect-wallet">连接 MetaMask</button><button id="refresh-assets" class="primary">刷新资产</button></div><p class="hint">MetaMask Connect 仅用于选取公开地址，无需签名或提供助记词。也可直接粘贴地址。</p></div></div>
           <div class="statgrid"><div class="stat"><small>已计价资产合计 (USD)</small><strong id="asset-total">—</strong><span>只统计有新鲜价格的资产</span></div><div class="stat"><small>未计价项目</small><strong id="asset-unpriced">—</strong><span>仍展示数量，不按零估值</span></div><div class="stat"><small>查询状态</small><strong id="asset-status">等待刷新</strong><span id="asset-updated">按来源查看时间</span></div></div>
           <div id="asset-notices" class="notice-stack" role="status"></div>
@@ -97,12 +103,12 @@ hbot stop</pre><p class="hint">运行前确认实例当前配置确实是 <code>
           <p class="hint">范围说明：NFT、流动性池份额、借贷债务和跨链桥在途资产未计入总额。第三方索引器可能遗漏代币，请以钱包和交易所记录核对。MetaMask Connect © ConsenSys Software Inc.，按<a href="/static/vendor/METAMASK-CONNECT-LICENSE" target="_blank" rel="noopener noreferrer">非商业许可</a>提供。</p>
         </section>
         <section class="page" id="page-trade">
-          <div class="pagehead"><div><div class="eyebrow">SPOT TRADING</div><h1>真实币安现货交易</h1><p class="subtitle">仅限手动订单。预览、解锁、确认后才向交易所发送。</p></div><span class="pill live-pill">● 真实交易</span></div>
+          <div class="pagehead"><div><h1>真实币安现货交易</h1><p class="subtitle">仅限手动订单。预览、解锁、确认后才向交易所发送。</p></div><span class="pill live-pill">● 真实交易</span></div>
           <div class="panel"><div class="paneltitle"><h2>手动下单</h2><span id="trade-enabled" class="pill subtle">检查设置中</span></div><div class="panelbody formgrid"><label>交易对 <input id="trade-symbol" value="BTCUSDT" autocomplete="off"></label><label>方向 <select id="trade-side"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label><label>类型 <select id="trade-type"><option value="LIMIT">限价</option><option value="MARKET">市价</option></select></label><label>数量（基础币） <input id="trade-quantity" type="number" step="any" min="0" placeholder="例如 0.01"></label><label id="trade-limit-label">限价（报价币） <input id="trade-limit-price" type="number" step="any" min="0" placeholder="例如 100"></label><button id="trade-preview" class="primary">预检并查看订单</button><p class="hint wide">预览列出预计金额、预计费用、预计滑点和限额。市价单成交价可能不同；真实订单状态以币安查询为准。</p></div></div>
           <div class="panel"><div class="paneltitle"><h2>最近真实订单</h2><button id="refresh-orders">刷新状态</button></div><div class="panelbody tablewrap"><table><thead><tr><th>时间</th><th>交易对</th><th>方向 / 类型</th><th>数量</th><th>订单状态</th><th>已成交</th><th>操作</th></tr></thead><tbody id="trade-orders"></tbody></table></div></div>
-          <dialog id="trade-dialog"><div class="dialog-head"><div class="eyebrow">REAL SPOT ORDER</div><h2 id="trade-dialog-title">真实币安现货订单预览</h2></div><div id="trade-dialog-summary" class="preview-summary"></div><p class="hint">提交请求已发送，不等于订单已成交；若状态不确定，仅查询原订单。</p><label>交易解锁口令 <input id="trade-unlock" type="password" autocomplete="off"></label><div class="dialog-actions"><button id="trade-dialog-close">返回修改</button><button id="trade-dialog-submit" class="primary">确认真实下单</button></div></dialog>
+          <dialog id="trade-dialog"><div class="dialog-head"><h2 id="trade-dialog-title">真实币安现货订单预览</h2></div><div id="trade-dialog-summary" class="preview-summary"></div><p class="hint">提交请求已发送，不等于订单已成交；若状态不确定，仅查询原订单。</p><label>交易解锁口令 <input id="trade-unlock" type="password" autocomplete="off"></label><div class="dialog-actions"><button id="trade-dialog-close">返回修改</button><button id="trade-dialog-submit" class="primary">确认真实下单</button></div></dialog>
         </section>
-        <section class="page" id="page-settings"><div class="pagehead"><div><div class="eyebrow">SETTINGS</div><h1>连接与风控</h1></div></div><div class="panel"><div class="paneltitle"><h2>币安只读 API</h2></div><div class="panelbody formgrid"><label class="wide">API Key <input id="read-key" autocomplete="off"></label><label class="wide">API Secret <input id="read-secret" type="password" autocomplete="new-password"></label><button id="connect-read-key" class="primary">连接只读账户</button><p class="hint wide">请创建仅有读取权限的密钥，关闭交易及提现权限；先在本机服务环境设置 CRYPTO_MASTER_KEY。</p></div></div><div class="panel"><div class="paneltitle"><h2>真实交易开关与限额</h2><span class="pill live-pill">默认关闭</span></div><div class="panelbody formgrid"><label class="wide">交易 API Key <input id="trade-key" autocomplete="off"></label><label class="wide">交易 API Secret <input id="trade-secret" type="password" autocomplete="new-password"></label><label>单笔上限（报价币） <input id="trade-per-limit" type="number" min="0" step="any" value="100"></label><label>单日上限（报价币） <input id="trade-day-limit" type="number" min="0" step="any" value="500"></label><label class="wide">交易解锁口令（至少 12 字符） <input id="trade-passphrase" type="password" autocomplete="new-password"></label><div class="settings-actions wide"><button id="enable-trading" class="primary">验证密钥并启用真实交易</button><button id="disable-trading">立即停用真实交易</button></div><p class="hint wide">交易密钥须允许现货交易，但严禁提现权限；请在币安侧限制 IP。密钥保存在本机加密文件中，口令只保存带盐哈希。上限按报价币名义金额计；首版只支持 USDT 报价交易对。</p></div></div></section>
+        <section class="page" id="page-settings"><div class="pagehead"><div><h1>连接与风控</h1></div></div><div class="panel"><div class="paneltitle"><h2>币安只读 API</h2></div><div class="panelbody formgrid"><label class="wide">API Key <input id="read-key" autocomplete="off"></label><label class="wide">API Secret <input id="read-secret" type="password" autocomplete="new-password"></label><button id="connect-read-key" class="primary">连接只读账户</button><p class="hint wide">请创建仅有读取权限的密钥，关闭交易及提现权限。{% if workspace_user %}凭据在你的个人空间加密保存。{% else %}先在本机服务环境设置 CRYPTO_MASTER_KEY。{% endif %}</p></div></div><div class="panel"><div class="paneltitle"><h2>真实交易开关与限额</h2><span class="pill live-pill">默认关闭</span></div><div class="panelbody formgrid"><label class="wide">交易 API Key <input id="trade-key" autocomplete="off"></label><label class="wide">交易 API Secret <input id="trade-secret" type="password" autocomplete="new-password"></label><label>单笔上限（报价币） <input id="trade-per-limit" type="number" min="0" step="any" value="100"></label><label>单日上限（报价币） <input id="trade-day-limit" type="number" min="0" step="any" value="500"></label><label class="wide">交易解锁口令（至少 12 字符） <input id="trade-passphrase" type="password" autocomplete="new-password"></label><div class="settings-actions wide"><button id="enable-trading" class="primary">验证密钥并启用真实交易</button><button id="disable-trading">立即停用真实交易</button></div><p class="hint wide">交易密钥须允许现货交易，但严禁提现权限；请在币安侧限制 IP。{% if workspace_user %}密钥在个人空间加密保存，{% else %}密钥保存在本机加密文件中，{% endif %}口令只保存带盐哈希。上限按报价币名义金额计；首版只支持 USDT 报价交易对。</p></div></div></section>
       </div>
     </main>
   </div>

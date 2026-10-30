@@ -1,4 +1,5 @@
 import hmac
+import hashlib
 import json
 import os
 import re
@@ -9,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, url_for
 
 from .backtest import load_backtest, run_backtest, save_backtest
 from .binance_account import BinanceAccountSource
@@ -32,7 +33,17 @@ from .valuation import CoinGeckoPriceClient, quote_usd, summarize_assets
 def create_app(runtime_dir: Path, market_client=None, account_source=None, onchain_source=None, price_client=None, trade_gateway=None, strategy_catalog=None) -> Flask:
     app = Flask(__name__)
     app.extensions["draining"] = threading.Event()
-    app.config.update(BIND_HOST="127.0.0.1", TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
+    app.config.update(BIND_HOST="127.0.0.1", TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"], CSRF_COOKIE_NAME="csrf_token", PUBLIC_ORIGIN=None)
+    asset_versions = {}
+
+    @app.context_processor
+    def workspace_context():
+        def asset(filename):
+            if filename not in asset_versions:
+                asset_versions[filename] = hashlib.sha256((Path(app.static_folder) / filename).read_bytes()).hexdigest()[:12]
+            return url_for('static', filename=filename, v=asset_versions[filename])
+        return dict(workspace_user=request.environ.get('crypto.identity'), asset=asset,
+                    csrf_cookie_name=app.config['CSRF_COOKIE_NAME'])
     app.extensions["store"] = open_store(Path(runtime_dir))
     app.extensions["market_client"] = market_client or BinancePublicClient()
     app.extensions["strategy_catalog"] = strategy_catalog or StrategySourceCatalog()
@@ -54,12 +65,12 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
         origin = request.headers.get("Origin", "")
         parsed = urlsplit(origin)
         token = request.headers.get("X-CSRF-Token", "")
-        cookie = request.cookies.get("csrf_token", "")
+        cookie = request.cookies.get(app.config['CSRF_COOKIE_NAME'], "")
+        correct_origin = origin == app.config['PUBLIC_ORIGIN'] if app.config['PUBLIC_ORIGIN'] else parsed.scheme == request.scheme and parsed.netloc == request.host
         if (
             request.headers.get("X-App-Request") != "1"
             or not origin
-            or parsed.scheme != request.scheme
-            or parsed.netloc != request.host
+            or not correct_origin
             or not token
             or not cookie
             or not hmac.compare_digest(token, cookie)
@@ -68,18 +79,24 @@ def create_app(runtime_dir: Path, market_client=None, account_source=None, oncha
 
     @app.after_request
     def secure_headers(response):
-        if not request.cookies.get("csrf_token"):
-            response.set_cookie("csrf_token", secrets.token_urlsafe(32), httponly=False, samesite="Strict")
+        if not request.cookies.get(app.config['CSRF_COOKIE_NAME']):
+            response.set_cookie(app.config['CSRF_COOKIE_NAME'], secrets.token_urlsafe(32), httponly=False, samesite="Strict", secure=bool(app.config['PUBLIC_ORIGIN']))
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://mm-sdk-relay.api.cx.metamask.io wss://data-stream.binance.vision https://ethereum-rpc.publicnode.com https://bsc-rpc.publicnode.com; frame-ancestors 'none'"
-        if request.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
+        if request.endpoint == 'static' and request.args.get('v') and request.args.get('v') == asset_versions.get(request.view_args.get('filename')):
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        else:
+            response.headers["Cache-Control"] = "private, no-store"
         return response
 
     @app.get("/health")
     def health():
         return jsonify(status="ok")
+
+    @app.get('/api/session')
+    def workspace_session():
+        return jsonify(user=request.environ.get('crypto.identity'))
 
     @app.errorhandler(ValueError)
     def bad_input(error):
